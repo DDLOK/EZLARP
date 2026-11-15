@@ -3,49 +3,120 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EZLARP &mdash; jar decompiler</title>
+<title>EZLARP &mdash; jar / class / exe decompiler</title>
+<meta name="description" content="In-browser Java decompiler and exe analyzer. Vineflower + CFR on WebAssembly. Nothing leaves your machine.">
 <link rel="stylesheet" href="/style.css">
-<script src="https://cjrtnc.leaningtech.com/3.0/cj3loader.js"></script>
+<script src="https://cjrtnc.leaningtech.com/5.0/loader.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 </head>
 <body>
 <header class="top">
   <div class="brand">EZLARP</div>
   <nav class="tabs">
     <span class="tab active">DECOMPILER</span>
-    <span class="tab muted">more soon</span>
+    <a class="tab" href="https://github.com/DDLOK/EZLARP" target="_blank" rel="noopener">SOURCE</a>
   </nav>
 </header>
 
 <main class="wrap">
   <section class="drop" id="drop">
-    <input type="file" id="file" accept=".jar,.class" hidden>
+    <input type="file" id="file" accept=".jar,.class,.zip,.war,.exe,.dll" multiple hidden>
     <div class="drop-inner">
-      <div class="big">Drop a <b>.jar</b> or <b>.class</b></div>
-      <div class="sub">or <button id="pick" class="link">choose file</button></div>
-      <div class="hint">in-browser decompile &middot; Vineflower on CheerpJ WASM &middot; nothing leaves your machine</div>
+      <div class="big">Drop a <b>.jar</b>, <b>.class</b> or <b>.exe</b></div>
+      <div class="sub">anywhere on the page, <button id="pick" class="link">choose file</button>, or <button id="sample" class="link">try a sample</button></div>
+      <div class="opts">
+        <label>engine
+          <select id="engine">
+            <option value="vf">Vineflower 1.12</option>
+            <option value="cfr">CFR 0.152</option>
+          </select>
+        </label>
+        <label class="chk"><input type="checkbox" id="fallback" checked> retry with the other engine on failure</label>
+      </div>
+      <div class="hint">in-browser decompile &middot; CheerpJ 5 WebAssembly JVM &middot; nothing leaves your machine</div>
     </div>
   </section>
 
-  <section class="status" id="status" hidden>
-    <div class="row"><span class="k">file</span><span class="v" id="fname">&mdash;</span></div>
-    <div class="row"><span class="k">size</span><span class="v" id="fsize">&mdash;</span></div>
-    <div class="row"><span class="k">state</span><span class="v" id="fstate">idle</span></div>
+  <section class="card status" id="status" hidden>
+    <div class="status-grid">
+      <div class="row"><span class="k">file</span><span class="v" id="fname">&mdash;</span></div>
+      <div class="row"><span class="k">size</span><span class="v" id="fsize">&mdash;</span></div>
+      <div class="row"><span class="k">type</span><span class="v" id="ftype">&mdash;</span></div>
+      <div class="row"><span class="k">sha-256</span><span class="v hash" id="fhash">&mdash;</span></div>
+      <div class="row"><span class="k">state</span><span class="v" id="fstate">idle</span></div>
+    </div>
+    <div class="tags" id="ftags"></div>
     <div class="bar"><div class="fill" id="fill"></div></div>
   </section>
 
-  <section class="result" id="result" hidden>
-    <div class="result-head">
-      <div class="tabs files" id="filetabs"></div>
-      <button id="dl" class="btn ghost">download all</button>
-    </div>
-    <pre id="code" class="code"></pre>
-  </section>
-
   <section class="err" id="err" hidden></section>
+
+  <section class="card result" id="result" hidden>
+    <div class="result-tabs" id="rtabs">
+      <button class="rtab active" data-view="source">SOURCE</button>
+      <button class="rtab" data-view="details">DETAILS</button>
+      <button class="rtab" data-view="strings" hidden>STRINGS</button>
+      <button class="rtab" data-view="log">LOG</button>
+      <div class="spacer"></div>
+      <button id="retry" class="btn ghost" hidden>retry with CFR</button>
+      <button id="dl" class="btn">download .zip</button>
+    </div>
+
+    <div class="view" data-view="source">
+      <aside class="side">
+        <div class="search">
+          <input id="q" type="search" placeholder="filter files" autocomplete="off" spellcheck="false">
+          <div class="seg" id="qmode">
+            <button class="on" data-m="files">files</button>
+            <button data-m="code">code</button>
+          </div>
+        </div>
+        <div class="tree" id="tree"></div>
+        <div class="side-foot" id="sidefoot"></div>
+      </aside>
+      <div class="pane">
+        <div class="pane-head">
+          <span class="path" id="cpath">&mdash;</span>
+          <span class="meta" id="cmeta"></span>
+          <button class="btn ghost sm" id="wrap" title="toggle word wrap">wrap</button>
+          <button class="btn ghost sm" id="copy">copy</button>
+          <button class="btn ghost sm" id="dlone">download</button>
+        </div>
+        <div class="codebox" id="codebox">
+          <pre class="gutter" id="gutter" aria-hidden="true"></pre>
+          <pre class="code"><code id="code"></code></pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="view" data-view="details" hidden><div class="details" id="details"></div></div>
+
+    <div class="view" data-view="strings" hidden>
+      <div class="strings-head">
+        <input id="sq" type="search" placeholder="filter strings" autocomplete="off" spellcheck="false">
+        <select id="skind">
+          <option value="">all</option>
+          <option value="url">urls</option>
+          <option value="ip">ips</option>
+          <option value="path">paths</option>
+          <option value="reg">registry</option>
+          <option value="file">file names</option>
+        </select>
+        <span class="meta" id="scount"></span>
+      </div>
+      <div class="strings" id="strings"></div>
+    </div>
+
+    <div class="view" data-view="log" hidden><pre class="logbox" id="logbox"></pre></div>
+  </section>
 </main>
 
-<footer class="foot">EZLARP &middot; decompiler v0.2 &middot; vineflower in-browser (CheerpJ)</footer>
+<div class="overlay" id="overlay" hidden><div>drop to decompile</div></div>
+<pre id="console" hidden></pre>
+
+<footer class="foot">EZLARP &middot; v0.3 &middot; Vineflower 1.12.0 / CFR 0.152 on CheerpJ 5</footer>
+<script src="/inspect.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
