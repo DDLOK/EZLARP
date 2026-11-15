@@ -3,13 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "tail": "wrangler tail",
-    "cf-typegen": "wrangler types"
-  },
-  "dependencies": {
-    "@cloudflare/containers": "^0.0.26"
+    "dev": "wrangler pages dev public",
+    "deploy": "wrangler pages deploy public --project-name=ezlarp",
+    "tail": "wrangler pages deployment tail --project-name=ezlarp"
   },
   "devDependencies": {
     "wrangler": "^4.162.0"

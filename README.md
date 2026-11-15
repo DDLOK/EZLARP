@@ -1,70 +1,70 @@
 # EZLARP
 
-jar / class decompiler &middot; Vineflower engine &middot; slim black UI &middot; **100% Cloudflare**
+jar / class decompiler &middot; Vineflower engine &middot; slim black UI
+
+## Architecture (free, git-deployed)
 
 ```
-ezlarp/
-  src/worker.js         # Worker: routes /api/* -> container, else -> static assets
-  public/               # static frontend (served via Workers Static Assets)
-    index.html style.css app.js
-  backend/              # container image (Dockerfile + Node + Vineflower)
-    server.js package.json Dockerfile vineflower.jar
-  wrangler.toml         # Worker + Container + Assets config
-  package.json
-```
-
-## Architecture
-
-```
-  browser -> Worker (edge)
+  browser -> Cloudflare Pages (free)
               |
-              +-- /api/*       -> Container (Durable Object, Docker image, scales to 0)
-              |                     \__ Node + Vineflower + Java 17
-              |
-              +-- everything   -> Workers Static Assets (public/)
+              +-- public/*               static frontend
+              +-- /api/decompile         Pages Function proxy
+                        |
+                        v
+             Render Web Service (free tier)
+                  Node + Vineflower + Java 17
 ```
 
-No separate host, no second provider. One Cloudflare account, one git repo, one deploy.
-Requires **Workers Paid** ($5/month) for the Container binding.
+Both halves live in this one repo. A `git push` to `main` auto-redeploys
+both ends &mdash; Cloudflare Pages (reads `wrangler.toml`) and Render
+(reads `render.yaml`).
 
-## First-time setup (git-connected, no local Docker needed)
+## One-time setup
 
-1. Push this folder to a **GitHub** repo.
-2. Open your Cloudflare dashboard &rarr; **Workers & Pages** &rarr; **Create** &rarr; **Workers** &rarr; **Import a repository**.
-3. Pick the GitHub repo. Cloudflare detects `wrangler.toml` and sets:
-   - Build command: `npm install`
-   - Deploy command: `npx wrangler deploy`
-4. On the project **Settings &rarr; Variables and Secrets**, add:
-   - `BACKEND_KEY` = any long random string (used to lock the container endpoint)
-5. Click **Save and Deploy**. Cloudflare builds the Dockerfile server-side and pushes the image into their registry.
-6. After the deploy, visit `https://ezlarp.<your-subdomain>.workers.dev` &mdash; drop a jar.
+### 1. Push to GitHub
+Already done: https://github.com/DDLOK/EZLARP
 
-Every `git push` to the production branch redeploys automatically.
+### 2. Set up the backend on Render
+1. Go to https://dashboard.render.com &rarr; **New** &rarr; **Blueprint**.
+2. Connect the `DDLOK/EZLARP` repo. Render reads `render.yaml`, proposes
+   a `ezlarp-backend` Docker service.
+3. For `BACKEND_KEY` enter any long random string. Keep a copy &mdash; you'll
+   paste the same value into Cloudflare Pages below.
+4. Click **Apply**. First build takes ~5 min (Java 17 + Node install).
+5. Grab the public URL &mdash; e.g. `https://ezlarp-backend.onrender.com`.
 
-## Manual deploy (optional, needs local Docker)
+Free-tier caveat: the service sleeps after 15 min idle, cold-starts in
+~40-60 s on the next request.
 
-If you'd rather deploy from your machine (requires Docker Desktop running):
+### 3. Set up the frontend on Cloudflare Pages
+1. Dashboard &rarr; **Workers & Pages** &rarr; **Create** &rarr; **Pages** &rarr;
+   **Connect to Git** &rarr; pick `DDLOK/EZLARP`.
+2. Build settings:
+   - Framework preset: **None**
+   - Build command: *(leave blank)*
+   - Build output directory: `public`
+   - Root directory: `/`
+3. **Settings &rarr; Environment variables** &rarr; add both to Production:
+   - `BACKEND_URL` = the Render URL from step 2.5
+   - `BACKEND_KEY` = the same key you set on Render
+4. **Save and Deploy**.
+
+Pages gives you `https://ezlarp.pages.dev` (or similar). Done.
+
+## Updating
 
 ```
-npx wrangler login
-npx wrangler secret put BACKEND_KEY
-npm run deploy
+git add .
+git commit -m "..."
+git push
 ```
 
-## Local dev
+Both Pages and Render redeploy on the push.
 
-Containers can be tested locally with Docker running:
-
-```
-npm run dev
-```
-
-Without Docker, you can still smoke-test the Worker's asset serving &mdash; `/api/*` calls will fail until deployed or until Docker is up.
-
-## Notes & gotchas
-
-- The container image is built from `backend/Dockerfile`; `backend/vineflower.jar` must exist before deploy (already present in this repo).
-- `instance_type = "standard-1"` gives the JVM 1 GB RAM; bump to `standard-2` in `wrangler.toml` for huge jars.
-- Container suspends after 10 min idle (`sleepAfter`), wakes in ~2&ndash;3 s on the next request.
-- Max upload through the Worker is 100 MB; backend caps itself at 25 MB (`MAX_BYTES` in `server.js`).
-- Rename the Worker project in Cloudflare if `ezlarp` is taken; also update `name =` in `wrangler.toml`.
+## Notes
+- The first jar you drop after a long idle period triggers Render's
+  cold start &mdash; the UI will show `decompiling` for ~40-60 s, then normal.
+- Frontend upload cap: 100 MB (Pages Function limit). Backend caps at
+  25 MB (`MAX_BYTES` in `server.js`).
+- If you later upgrade to Render paid ($7/mo) the service stops sleeping
+  and cold starts disappear.

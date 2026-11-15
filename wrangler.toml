@@ -1,27 +1,6 @@
 name = "ezlarp"
-main = "src/worker.js"
 compatibility_date = "2026-11-15"
-compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = "public"
 
-[assets]
-directory = "./public"
-binding = "ASSETS"
-not_found_handling = "single-page-application"
-
-[[containers]]
-class_name = "Backend"
-image = "./backend/Dockerfile"
-max_instances = 3
-instance_type = "standard-1"
-
-[[durable_objects.bindings]]
-name = "BACKEND"
-class_name = "Backend"
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["Backend"]
-
-# Non-secret vars. Secrets go through `wrangler secret put`.
-# [vars]
-# PUBLIC_TAG = "ezlarp"
+# BACKEND_URL and BACKEND_KEY are set in Cloudflare Pages dashboard
+# (Settings -> Environment variables / Secrets), NOT here.
