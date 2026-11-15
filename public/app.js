@@ -70,7 +70,7 @@ async function handle(f){
 
     const exit = await cheerpjRunJar(
       '/app/vineflower.jar',
-      '--silent=1',
+      '-log=WARN',
       '/str/input.jar',
       '/files/'
     );
