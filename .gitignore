@@ -1,0 +1,20 @@
+# node / wrangler
+node_modules
+.wrangler
+.dev.vars
+.env
+*.log
+
+# backend local
+backend/node_modules
+
+# pre-existing files in this folder, not part of the ezlarp build
+__pycache__/
+ezlarp.py
+harvest.py
+sieve_discord.py
+config.json
+list.txt
+proxy.txt
+requirements.txt
+README.txt
