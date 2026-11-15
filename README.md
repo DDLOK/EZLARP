@@ -1,70 +1,68 @@
 # EZLARP
 
 jar / class decompiler &middot; Vineflower engine &middot; slim black UI
+**100% in-browser &middot; no backend &middot; no account anywhere but GitHub + Cloudflare**
 
-## Architecture (free, git-deployed)
+## How it works
 
 ```
-  browser -> Cloudflare Pages (free)
-              |
-              +-- public/*               static frontend
-              +-- /api/decompile         Pages Function proxy
-                        |
-                        v
-             Render Web Service (free tier)
-                  Node + Vineflower + Java 17
+  browser
+    |
+    +-- loads public/ (static HTML/CSS/JS)
+    +-- loads CheerpJ 3 runtime (JVM-in-WASM, ~10 MB, cached)
+    +-- loads /vineflower.jar (1.8 MB, cached)
+    +-- user drops a .jar
+    +-- vineflower runs in the browser's virtual JVM
+    +-- output is unzipped with JSZip in the browser
+    +-- .java source files render in the UI
+
+  nothing ever leaves the user's machine.
 ```
 
-Both halves live in this one repo. A `git push` to `main` auto-redeploys
-both ends &mdash; Cloudflare Pages (reads `wrangler.toml`) and Render
-(reads `render.yaml`).
+Zero servers. The entire decompiler runs client-side.
 
-## One-time setup
+## Architecture (free, trusted, git-deployed)
 
-### 1. Push to GitHub
-Already done: https://github.com/DDLOK/EZLARP
+- Source lives in: https://github.com/DDLOK/EZLARP
+- Static files served by: **Cloudflare Pages** (free, unlimited bandwidth, CDN)
+- Deploys triggered by: **GitHub Actions** &rarr; `wrangler pages deploy`
+- Alternative: Cloudflare Pages git-connect also redeploys on push (pick one, not both)
 
-### 2. Set up the backend on Render
-1. Go to https://dashboard.render.com &rarr; **New** &rarr; **Blueprint**.
-2. Connect the `DDLOK/EZLARP` repo. Render reads `render.yaml`, proposes
-   a `ezlarp-backend` Docker service.
-3. For `BACKEND_KEY` enter any long random string. Keep a copy &mdash; you'll
-   paste the same value into Cloudflare Pages below.
-4. Click **Apply**. First build takes ~5 min (Java 17 + Node install).
-5. Grab the public URL &mdash; e.g. `https://ezlarp-backend.onrender.com`.
+## Deploy
 
-Free-tier caveat: the service sleeps after 15 min idle, cold-starts in
-~40-60 s on the next request.
+### Option 1: Cloudflare Pages git-connect (easiest, zero setup)
 
-### 3. Set up the frontend on Cloudflare Pages
-1. Dashboard &rarr; **Workers & Pages** &rarr; **Create** &rarr; **Pages** &rarr;
-   **Connect to Git** &rarr; pick `DDLOK/EZLARP`.
+1. Dashboard &rarr; **Workers & Pages** &rarr; **Create** &rarr; **Pages** &rarr; **Connect to Git** &rarr; pick `DDLOK/EZLARP`.
 2. Build settings:
-   - Framework preset: **None**
-   - Build command: *(leave blank)*
+   - Build command: *(blank)*
    - Build output directory: `public`
-   - Root directory: `/`
-3. **Settings &rarr; Environment variables** &rarr; add both to Production:
-   - `BACKEND_URL` = the Render URL from step 2.5
-   - `BACKEND_KEY` = the same key you set on Render
-4. **Save and Deploy**.
+3. **Save and Deploy**.
 
-Pages gives you `https://ezlarp.pages.dev` (or similar). Done.
+That's it. Every `git push main` auto-redeploys.
 
-## Updating
+### Option 2: GitHub Actions (if you want deploy pipelines in-repo)
+
+The workflow at `.github/workflows/deploy.yml` deploys to Cloudflare Pages
+on every push to `main`. One-time secret setup in your GitHub repo:
+
+- Settings &rarr; Secrets and variables &rarr; Actions &rarr; **New repository secret**:
+  - `CLOUDFLARE_API_TOKEN` &mdash; create at https://dash.cloudflare.com/profile/api-tokens with the "Edit Cloudflare Workers" template
+  - `CLOUDFLARE_ACCOUNT_ID` &mdash; `e3fcc3146ae0b5a2e2470687a8dcde48`
+
+Then `git push` and GitHub Actions deploys.
+
+## Local dev
 
 ```
-git add .
-git commit -m "..."
-git push
+npm install
+npm run dev
 ```
 
-Both Pages and Render redeploy on the push.
+Opens on http://localhost:8788.
 
 ## Notes
-- The first jar you drop after a long idle period triggers Render's
-  cold start &mdash; the UI will show `decompiling` for ~40-60 s, then normal.
-- Frontend upload cap: 100 MB (Pages Function limit). Backend caps at
-  25 MB (`MAX_BYTES` in `server.js`).
-- If you later upgrade to Render paid ($7/mo) the service stops sleeping
-  and cold starts disappear.
+
+- First visit downloads ~10 MB of CheerpJ runtime. Cached after that &mdash; subsequent loads are fast.
+- First decompile per session takes a few seconds extra (JVM cold start inside the WASM runtime).
+- Huge jars (&gt;50 MB) may lag; browser memory is the ceiling, usually fine up to a few hundred MB.
+- Nothing is uploaded anywhere. The jar never leaves the user's device.

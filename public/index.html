@@ -3,8 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EZLARP — jar decompiler</title>
+<title>EZLARP &mdash; jar decompiler</title>
 <link rel="stylesheet" href="/style.css">
+<script src="https://cjrtnc.leaningtech.com/3.0/cj3loader.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 <body>
 <header class="top">
@@ -21,7 +23,7 @@
     <div class="drop-inner">
       <div class="big">Drop a <b>.jar</b> or <b>.class</b></div>
       <div class="sub">or <button id="pick" class="link">choose file</button></div>
-      <div class="hint">analysis via Vineflower &middot; files are processed then purged</div>
+      <div class="hint">in-browser decompile &middot; Vineflower on CheerpJ WASM &middot; nothing leaves your machine</div>
     </div>
   </section>
 
@@ -43,7 +45,7 @@
   <section class="err" id="err" hidden></section>
 </main>
 
-<footer class="foot">EZLARP &middot; decompiler v0.1 &middot; vineflower backend</footer>
+<footer class="foot">EZLARP &middot; decompiler v0.2 &middot; vineflower in-browser (CheerpJ)</footer>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -1,6 +1,3 @@
 name = "ezlarp"
-compatibility_date = "2026-11-15"
+compatibility_date = "2026-11-16"
 pages_build_output_dir = "public"
-
-# BACKEND_URL and BACKEND_KEY are set in Cloudflare Pages dashboard
-# (Settings -> Environment variables / Secrets), NOT here.

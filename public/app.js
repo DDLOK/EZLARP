@@ -1,23 +1,23 @@
-const API = '/api/decompile';
-const drop   = document.getElementById('drop');
-const fileEl = document.getElementById('file');
-const pick   = document.getElementById('pick');
-const status = document.getElementById('status');
-const fname  = document.getElementById('fname');
-const fsize  = document.getElementById('fsize');
-const fstate = document.getElementById('fstate');
-const fill   = document.getElementById('fill');
-const result = document.getElementById('result');
+const drop     = document.getElementById('drop');
+const fileEl   = document.getElementById('file');
+const pick     = document.getElementById('pick');
+const status   = document.getElementById('status');
+const fname    = document.getElementById('fname');
+const fsize    = document.getElementById('fsize');
+const fstate   = document.getElementById('fstate');
+const fill     = document.getElementById('fill');
+const result   = document.getElementById('result');
 const filetabs = document.getElementById('filetabs');
-const code   = document.getElementById('code');
-const err    = document.getElementById('err');
-const dl     = document.getElementById('dl');
+const code     = document.getElementById('code');
+const err      = document.getElementById('err');
+const dl       = document.getElementById('dl');
 
 let currentFiles = {};
 let currentName  = '';
+let cheerpReady  = null;
 
-pick.onclick = () => fileEl.click();
-fileEl.onchange = e => handle(e.target.files[0]);
+pick.onclick     = () => fileEl.click();
+fileEl.onchange  = e => handle(e.target.files[0]);
 
 ['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {
   e.preventDefault(); drop.classList.add('drag');
@@ -35,6 +35,16 @@ function human(b){
   return b.toFixed(b<10?2:0)+' '+u[i];
 }
 
+async function initCheerp(){
+  if (cheerpReady) return cheerpReady;
+  cheerpReady = (async () => {
+    fstate.textContent = 'loading JVM (first time ~10MB)';
+    fill.style.width = '15%';
+    await cheerpjInit({ status: 'none', natives: {} });
+  })();
+  return cheerpReady;
+}
+
 async function handle(f){
   if (!f) return;
   err.hidden = true;
@@ -42,41 +52,62 @@ async function handle(f){
   status.hidden = false;
   fname.textContent = f.name;
   fsize.textContent = human(f.size);
-  fstate.textContent = 'uploading';
-  fill.style.width = '30%';
+  fstate.textContent = 'reading';
+  fill.style.width = '5%';
 
-  const fd = new FormData();
-  fd.append('file', f);
+  try {
+    const buf = new Uint8Array(await f.arrayBuffer());
 
-  try{
+    await initCheerp();
+
+    fstate.textContent = 'staging input';
+    fill.style.width = '35%';
+
+    cheerpOSAddStringFile('/str/input.jar', buf);
+
     fstate.textContent = 'decompiling';
-    fill.style.width = '65%';
-    const r = await fetch(API, { method:'POST', body:fd });
-    if (!r.ok){
-      const t = await r.text();
-      throw new Error(`${r.status} — ${t.slice(0,400)}`);
+    fill.style.width = '55%';
+
+    const exit = await cheerpjRunJar(
+      '/app/vineflower.jar',
+      '--silent=1',
+      '/str/input.jar',
+      '/files/'
+    );
+
+    if (exit !== 0) throw new Error(`vineflower exit code ${exit}`);
+
+    fstate.textContent = 'collecting output';
+    fill.style.width = '85%';
+
+    const outJarBlob = await cjFileBlob('/files/input.jar');
+    const outBuf = new Uint8Array(await outJarBlob.arrayBuffer());
+
+    const zip = await JSZip.loadAsync(outBuf);
+    const files = {};
+    const names = Object.keys(zip.files).filter(n => n.endsWith('.java')).slice(0, 400);
+    for (const n of names) files[n] = await zip.files[n].async('string');
+
+    if (!names.length){
+      throw new Error('no .java files in decompiled output');
     }
-    const data = await r.json();
+
     fill.style.width = '100%';
     fstate.textContent = 'done';
-    currentFiles = data.files || {};
+
+    currentFiles = files;
     currentName  = f.name;
     render();
   } catch(e){
     fstate.textContent = 'error';
     fill.style.width = '100%';
-    err.textContent = '[error] ' + e.message;
+    err.textContent = '[error] ' + (e && e.message || e);
     err.hidden = false;
   }
 }
 
 function render(){
   const names = Object.keys(currentFiles);
-  if (!names.length){
-    err.textContent = '[warn] decompiler returned nothing';
-    err.hidden = false;
-    return;
-  }
   filetabs.innerHTML = '';
   names.forEach((n,i) => {
     const t = document.createElement('div');
