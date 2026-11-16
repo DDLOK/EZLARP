@@ -3,16 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EZLARP &mdash; jar / class / exe decompiler</title>
-<meta name="description" content="In-browser Java decompiler and exe analyzer. Vineflower + CFR on WebAssembly. Nothing leaves your machine.">
+<title>EZLARP &mdash; jar / apk / exe decompiler &amp; scanner</title>
+<meta name="description" content="In-browser Java decompiler, APK/DEX decompiler, exe analyzer and threat scan. Vineflower + CFR on WebAssembly. Nothing leaves your machine.">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0a'/%3E%3Cpath d='M9 9h14v3H12.5v2.6H21v3h-8.5V20H23v3H9z' fill='%237af0a1'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
 <script src="https://cjrtnc.leaningtech.com/5.0/loader.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="/vendor/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 </head>
 <body>
 <header class="top">
-  <div class="brand">EZLARP</div>
+  <a class="brand" href="/">EZLARP</a>
   <nav class="tabs">
     <span class="tab active">DECOMPILER</span>
     <a class="tab" href="https://github.com/DDLOK/EZLARP" target="_blank" rel="noopener">SOURCE</a>
@@ -21,10 +23,10 @@
 
 <main class="wrap">
   <section class="drop" id="drop">
-    <input type="file" id="file" accept=".jar,.class,.zip,.war,.exe,.dll" multiple hidden>
+    <input type="file" id="file" multiple hidden>
     <div class="drop-inner">
-      <div class="big">Drop a <b>.jar</b>, <b>.class</b> or <b>.exe</b></div>
-      <div class="sub">anywhere on the page, <button id="pick" class="link">choose file</button>, or <button id="sample" class="link">try a sample</button></div>
+      <div class="big">Drop a <b>.jar</b>, <b>.class</b>, <b>.apk</b> or <b>.exe</b></div>
+      <div class="sub">anywhere on the page, or <button id="pick" class="link">choose file</button></div>
       <div class="opts">
         <label>engine
           <select id="engine">
@@ -32,19 +34,37 @@
             <option value="cfr">CFR 0.152</option>
           </select>
         </label>
-        <label class="chk"><input type="checkbox" id="fallback" checked> retry with the other engine on failure</label>
+        <label class="chk" title="If one engine fails, try the other automatically"><input type="checkbox" id="fallback" checked> auto-fallback</label>
+        <label class="chk" title="Give obfuscated classes, fields and methods readable unique names"><input type="checkbox" id="rename"> rename obfuscated names</label>
       </div>
-      <div class="hint">in-browser decompile &middot; CheerpJ 5 WebAssembly JVM &middot; nothing leaves your machine</div>
+      <div class="samples">samples:
+        <button class="link" data-sample="sample.jar">mod .jar</button> &middot;
+        <button class="link" data-sample="sample-wrapped.exe">wrapped .exe</button> &middot;
+        <button class="link" data-sample="sample.apk">.apk</button>
+      </div>
+      <div class="hint">tip: drop a whole mods folder (select all jars) to batch-scan them</div>
+      <div class="hint">decompile + threat scan run in your browser &middot; CheerpJ 5 WebAssembly JVM &middot; nothing leaves your machine</div>
     </div>
   </section>
 
+  <section class="card recent" id="recent" hidden>
+    <div class="recent-head"><h3>RECENT SCANS</h3><span class="meta">names and results only, kept in this browser · files are never stored</span><button class="link" id="clearhist">clear</button></div>
+    <div id="recentlist"></div>
+  </section>
+
   <section class="card status" id="status" hidden>
-    <div class="status-grid">
-      <div class="row"><span class="k">file</span><span class="v" id="fname">&mdash;</span></div>
-      <div class="row"><span class="k">size</span><span class="v" id="fsize">&mdash;</span></div>
-      <div class="row"><span class="k">type</span><span class="v" id="ftype">&mdash;</span></div>
-      <div class="row"><span class="k">sha-256</span><span class="v hash" id="fhash">&mdash;</span></div>
-      <div class="row"><span class="k">state</span><span class="v" id="fstate">idle</span></div>
+    <div class="status-top">
+      <img id="ficon" class="ficon" alt="" hidden>
+      <div class="verdict" id="verdict" hidden></div>
+      <div class="status-grid">
+        <div class="row"><span class="k">file</span><span class="v" id="fname">&mdash;</span></div>
+        <div class="row"><span class="k">size</span><span class="v" id="fsize">&mdash;</span></div>
+        <div class="row"><span class="k">type</span><span class="v" id="ftype">&mdash;</span></div>
+        <div class="row"><span class="k">state</span><span class="v" id="fstate">idle</span></div>
+        <div class="row"><span class="k">md5</span><span class="v hash" id="fmd5">&mdash;</span></div>
+        <div class="row"><span class="k">sha-1</span><span class="v hash" id="fsha1">&mdash;</span></div>
+        <div class="row wide"><span class="k">sha-256 <a id="vt" class="vt" target="_blank" rel="noopener noreferrer" hidden title="Opens VirusTotal with this hash. Only the hash is sent, and only if you click.">look up on VirusTotal ↗</a></span><span class="v hash" id="fhash">&mdash;</span></div>
+      </div>
     </div>
     <div class="tags" id="ftags"></div>
     <div class="bar"><div class="fill" id="fill"></div></div>
@@ -55,40 +75,53 @@
   <section class="card result" id="result" hidden>
     <div class="result-tabs" id="rtabs">
       <button class="rtab active" data-view="source">SOURCE</button>
+      <button class="rtab" data-view="scan">SCAN<span class="dot" id="scandot" hidden></span></button>
       <button class="rtab" data-view="details">DETAILS</button>
       <button class="rtab" data-view="strings" hidden>STRINGS</button>
       <button class="rtab" data-view="log">LOG</button>
       <div class="spacer"></div>
+      <button id="decall" class="btn ghost" hidden title="Decompile every class now. Large jars can take several minutes.">decompile all</button>
       <button id="retry" class="btn ghost" hidden>retry with CFR</button>
+      <button id="report" class="btn ghost" title="Download the analysis as JSON">report</button>
       <button id="dl" class="btn">download .zip</button>
     </div>
+    <div class="banner" id="banner" hidden></div>
 
     <div class="view" data-view="source">
       <aside class="side">
         <div class="search">
           <input id="q" type="search" placeholder="filter files" autocomplete="off" spellcheck="false">
           <div class="seg" id="qmode">
-            <button class="on" data-m="files">files</button>
-            <button data-m="code">code</button>
+            <button class="on" data-m="files" title="Filter by file name">files</button>
+            <button data-m="code" title="Search decompiled source">code</button>
+            <button data-m="strings" title="Search string constants in every class, no decompile needed">strings</button>
           </div>
         </div>
         <div class="tree" id="tree"></div>
         <div class="side-foot" id="sidefoot"></div>
       </aside>
       <div class="pane">
+        <div class="ftabs" id="ftabs"></div>
         <div class="pane-head">
           <span class="path" id="cpath">&mdash;</span>
           <span class="meta" id="cmeta"></span>
-          <button class="btn ghost sm" id="wrap" title="toggle word wrap">wrap</button>
+          <select id="outline" class="sm" title="Jump to a class or method" hidden></select>
+          <button class="btn ghost sm" id="openjar" hidden>open this jar</button>
+          <button class="btn ghost sm" id="usages" title="Classes that reference this one (from the constant pools, no decompile needed)" hidden>usages</button>
+          <button class="btn ghost sm" id="bc" title="Show JVM bytecode for this class" hidden>bytecode</button>
+          <button class="btn ghost sm" id="wrap" title="Toggle word wrap">wrap</button>
           <button class="btn ghost sm" id="copy">copy</button>
           <button class="btn ghost sm" id="dlone">download</button>
         </div>
         <div class="codebox" id="codebox">
           <pre class="gutter" id="gutter" aria-hidden="true"></pre>
           <pre class="code"><code id="code"></code></pre>
+          <div class="preview" id="preview" hidden></div>
         </div>
       </div>
     </div>
+
+    <div class="view" data-view="scan" hidden><div class="scan" id="scan"></div></div>
 
     <div class="view" data-view="details" hidden><div class="details" id="details"></div></div>
 
@@ -112,11 +145,13 @@
   </section>
 </main>
 
-<div class="overlay" id="overlay" hidden><div>drop to decompile</div></div>
+<div class="overlay" id="overlay" hidden><div>drop to analyze</div></div>
 <pre id="console" hidden></pre>
 
-<footer class="foot">EZLARP &middot; v0.3 &middot; Vineflower 1.12.0 / CFR 0.152 on CheerpJ 5</footer>
+<footer class="foot">EZLARP &middot; v0.4 &middot; Vineflower 1.12.0 / CFR 0.152 / dex2jar 2.4 on CheerpJ 5 &middot; static heuristics, not an antivirus</footer>
 <script src="/inspect.js"></script>
+<script src="/scan.js"></script>
+<script src="/ui.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

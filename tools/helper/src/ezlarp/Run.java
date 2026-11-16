@@ -28,7 +28,12 @@ import org.jetbrains.java.decompiler.main.extern.IResultSaver;
 /**
  * EZLARP in-browser decompile driver (runs inside CheerpJ).
  *
- * usage: ezlarp.Run <vf|cfr> <input.jar|input.class> <output.zip>
+ * usage: ezlarp.Run <vf|cfr> <input.jar|input.class> <output.zip> [key=value ...]
+ *
+ * Extra key=value arguments are passed to the engine as options
+ * (Vineflower preference names, or CFR option names), except:
+ *   ezlarp.lib=<jar>   add a jar as library/classpath (used for on-demand
+ *                      decompiles of single classes, so types still resolve)
  *
  * Writes every decompiled source to output.zip under "src/", plus
  * "ezlarp/log.txt" with warnings and errors. Prints "EZP <n>" to stdout
@@ -64,8 +69,18 @@ public final class Run {
     Throwable fatal = null;
     zip = new ZipOutputStream(new FileOutputStream(out));
     try {
-      if ("cfr".equals(engine)) runCfr(in);
-      else runVineflower(in);
+      Map<String, String> extra = new HashMap<>();
+      for (int i = 3; i < args.length; i++) {
+        int eq = args[i].indexOf('=');
+        if (eq > 0) extra.put(args[i].substring(0, eq), args[i].substring(eq + 1));
+      }
+      String lib = extra.remove("ezlarp.lib");
+      if (lib != null && !lib.isEmpty()) {
+        if ("cfr".equals(engine)) extra.put("extraclasspath", lib);
+        else extra.put("ezlarp.lib", lib);
+      }
+      if ("cfr".equals(engine)) runCfr(in, extra);
+      else runVineflower(in, extra);
     } catch (Throwable t) {
       fatal = t;
       log.append("[fatal] ").append(stack(t)).append('\n');
@@ -80,7 +95,7 @@ public final class Run {
 
   // ---------------------------------------------------------------- vineflower
 
-  private static void runVineflower(File in) throws Exception {
+  private static void runVineflower(File in, Map<String, String> extra) throws Exception {
     Map<String, Object> opts = new HashMap<>();
     opts.put("log-level", "warn");
     opts.put("thread-count", "1");
@@ -88,6 +103,8 @@ public final class Run {
     opts.put("remove-synthetic", "1");
     opts.put("dump-code-lines", "0");
     opts.put("indent-string", "    ");
+    String lib = extra.remove("ezlarp.lib");
+    opts.putAll(extra);
 
     IResultSaver saver = new IResultSaver() {
       @Override public void saveFolder(String path) {}
@@ -126,6 +143,7 @@ public final class Run {
     Fernflower ff = new Fernflower(saver, opts, logger);
     try {
       ff.addSource(in);
+      if (lib != null) ff.addLibrary(new File(lib));
       ff.decompileContext();
     } finally {
       ff.clearContext();
@@ -134,10 +152,11 @@ public final class Run {
 
   // ---------------------------------------------------------------- cfr
 
-  private static void runCfr(File in) {
+  private static void runCfr(File in, Map<String, String> extra) {
     Map<String, String> opts = new HashMap<>();
     opts.put("silent", "true");
     opts.put("comments", "true");
+    opts.putAll(extra);
 
     OutputSinkFactory sinks = new OutputSinkFactory() {
       @Override

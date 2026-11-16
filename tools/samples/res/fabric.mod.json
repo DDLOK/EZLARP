@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "ezlarp-sample",
+  "version": "1.0.0",
+  "name": "EZLARP Sample Mod",
+  "description": "Inert demo jar used by the EZLARP 'try a sample' button.",
+  "authors": ["EZLARP"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": { "client": ["demo.mod.ExampleMod"] },
+  "mixins": ["ezlarp-sample.mixins.json"],
+  "depends": { "fabricloader": ">=0.15.0", "minecraft": "~1.21" }
+}

@@ -1,0 +1,277 @@
+// End-to-end test in headless Chrome against tools/test/server.py.
+// usage: node tools/test/e2e.js [baseUrl] [fixturesDir]
+'use strict';
+const { chromium } = require(process.env.PLAYWRIGHT || 'playwright');
+const fs = require('fs'), path = require('path');
+const BASE = process.argv[2] || 'http://127.0.0.1:8799';
+const FX = process.argv[3] || '/tmp/fx';
+const SHOTS = process.env.SHOTS || '/tmp/shots';
+fs.mkdirSync(SHOTS, { recursive: true });
+const stub = fs.readFileSync(path.join(__dirname, 'cheerpj-stub.js'), 'utf8');
+
+let pass = 0, fail = 0;
+const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } else { fail++; console.log('  FAIL', name, extra === undefined ? '' : extra); } };
+
+(async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHROME || '/usr/bin/google-chrome', args: ['--no-sandbox'] });
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, acceptDownloads: true });
+  await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE });
+  await ctx.route(/cjrtnc\.leaningtech\.com/, r => r.fulfill({ contentType: 'text/javascript', body: stub }));
+  await ctx.route(/cdnjs\.cloudflare\.com/, r => r.abort());
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  const EXPECTED = /unsupported file type/;
+  page.on('console', m => { if (m.type() === 'error' && !/ERR_FAILED|Failed to load resource/.test(m.text()) && !EXPECTED.test(m.text())) errors.push(m.text()); });
+  page.on('dialog', d => d.dismiss());
+
+  const state = () => page.textContent('#fstate');
+  const waitState = async (re, ms = 120000) => {
+    await page.waitForFunction(r => new RegExp(r).test(document.getElementById('fstate').textContent) || !document.getElementById('err').hidden, re.source, { timeout: ms });
+    const err = await page.$eval('#err', e => e.hidden ? '' : e.textContent);
+    if (err) console.log('  page error box:', err.slice(0, 400));
+    return err;
+  };
+  const reset = () => page.evaluate(() => { document.getElementById('fstate').textContent = '…'; document.getElementById('err').hidden = true; });
+  const sample = async n => { await reset(); await page.click(`[data-sample="${n}"]`); };
+  const drop = async file => { await reset(); await page.setInputFiles('#file', Array.isArray(file) ? file.map(f => path.join(FX, f)) : path.join(FX, file)); };
+  const code = () => page.textContent('#code');
+  const waitCode = (re, ms = 60000) => page.waitForFunction(r => new RegExp(r).test(document.getElementById('code').textContent), re.source, { timeout: ms }).then(() => true, () => false);
+  const shot = n => page.screenshot({ path: `${SHOTS}/${n}.png` });
+
+  await page.goto(BASE + '/');
+  ok(await page.title() === 'EZLARP — jar / apk / exe decompiler & scanner', 'title');
+
+  // ---------------- sample mod jar
+  console.log('sample jar');
+  await sample('sample.jar');
+  ok(!(await waitState(/^done/)), 'decompiled', await state());
+  ok(/ExampleMod\.java/.test(await page.textContent('#tree')), 'tree lists ExampleMod.java');
+  ok(await waitCode(/class ExampleMod/), 'first file is the entrypoint');
+  ok(await page.$eval('#verdict', e => !e.hidden && e.classList.contains('high')), 'verdict high');
+  ok(/high-risk/.test(await page.textContent('#ftags')), 'risk tag');
+  ok(/Fabric mod/.test(await page.textContent('#ftags')), 'fabric tag');
+  ok(/[0-9a-f]{64}/.test(await page.textContent('#fhash')) && /[0-9a-f]{32}/.test(await page.textContent('#fmd5')), 'hashes');
+  ok(/virustotal\.com\/gui\/file\/[0-9a-f]{64}/.test(await page.getAttribute('#vt', 'href')), 'virustotal link');
+  ok(await page.$$eval('#ftabs .ftab', t => t.length) === 1, 'one tab open');
+  ok(/^5 classes$/.test(await page.$$eval('#ftags .tagx', t => t.map(x => x.textContent).find(x => /class/.test(x)))), 'plural classes');
+  ok(/^2\s*high-risk indicators$/.test(await page.textContent('#verdict')), 'verdict count', await page.textContent('#verdict'));
+  await page.waitForTimeout(500);
+  ok(await page.$eval('#fill', e => e.style.width) === '100%', 'progress full when done');
+  ok(!(await page.$eval('#outline', e => e.hidden)) && /onInitialize/.test(await page.textContent('#outline')), 'outline has methods');
+  await shot('01-jar-source');
+
+  await page.click('.rtab[data-view=scan]');
+  const scanText = await page.textContent('#scan');
+  ok(/Discord webhook URL/.test(scanText) && /Reads the Minecraft session token/.test(scanText) && /Runs system commands/.test(scanText), 'scan findings');
+  ok(/api\.ipify\.org/.test(scanText), 'url list');
+  await shot('02-scan');
+  await page.click('#scan .finding.high a[data-cls]');
+  ok(await waitCode(/FAKE_WEBHOOK/), 'finding location opens ScanDemo');
+  ok(/ScanDemo\.java/.test(await page.textContent('#cpath')), 'path ScanDemo');
+  ok(await page.$$eval('#ftabs .ftab', t => t.length) === 2, 'two tabs');
+
+  await page.click('.rtab[data-view=details]');
+  const det = await page.textContent('#details');
+  ok(/EZLARP Sample Mod/.test(det) && /demo\.mod\.ExampleMod/.test(det) && /fabricloader/.test(det), 'fabric metadata');
+  ok(/PACKAGES|JAVA ARCHIVE/.test(det), 'jar details');
+  ok(/demo\.mod\.mixin\.TitleScreenMixin/.test(det), 'mixin classes listed');
+  await page.click('#details a[data-cls="demo/mod/mixin/TitleScreenMixin"]');
+  ok(await waitCode(/class TitleScreenMixin/), 'mixin link opens class');
+  await page.click('.rtab[data-view=details]');
+  await shot('03-details');
+
+  await page.click('.rtab[data-view=source]');
+  await page.click('#qmode [data-m=code]');
+  await page.fill('#q', 'onInitialize');
+  await page.waitForSelector('#tree .hit');
+  ok(/ExampleMod\.java:\d+/.test(await page.textContent('#tree')), 'code search');
+  await page.fill('#q', '/unknown\\s+feature/');
+  await page.waitForTimeout(400);
+  ok(/unknown feature/.test(await page.textContent('#tree')), 'regex code search', await page.textContent('#tree'));
+  await page.click('#qmode [data-m=strings]');
+  await page.fill('#q', 'webhooks');
+  await page.waitForSelector('#tree .hit');
+  ok(/demo\.mod\.ScanDemo/.test(await page.textContent('#tree')), 'string-constant search');
+  await page.click('#qmode [data-m=files]');
+  await page.fill('#q', 'config');
+  await page.waitForTimeout(200);
+  ok(await page.$$eval('#tree .node', n => n.length) === 1, 'file filter');
+  await page.press('#q', 'Enter');
+  ok(await waitCode(/class Config/), 'enter opens first match');
+  await page.fill('#q', '');
+  await page.press('#q', 'Escape');
+
+  // jump to class
+  await page.evaluate(() => openFile('demo/mod/ScanDemo.java'));
+  await waitCode(/class ScanDemo/);
+  const jumped = await page.evaluate(() => { const f = S.files.get(S.current); return resolveClass('ExampleMod', f.text) ? 'yes' : 'no'; });
+  ok(jumped === 'yes', 'resolveClass same package');
+
+  // usages (cross references)
+  await page.evaluate(() => openFile('demo/mod/Config.java'));
+  await waitCode(/class Config/);
+  await page.click('#usages');
+  ok(/usages of Config/.test(await page.textContent('#tree')) && /demo\.mod\.ExampleMod/.test(await page.textContent('#tree')), 'usages list', await page.textContent('#tree'));
+  await page.click('#tree .hit');
+  ok(await waitCode(/class ExampleMod/), 'usage opens referencing class');
+  await page.click('.usage-head a');
+
+  // line number click copies path:line
+  await page.mouse.click(...await page.$eval('#gutter', g => { const r = g.getBoundingClientRect(); return [r.left + r.width / 2, r.top + 14 + 19 * 2 + 5]; }));
+  await page.waitForTimeout(200);
+  ok(/^demo\/mod\/ExampleMod\.java:3$/.test(await page.evaluate(() => navigator.clipboard.readText())), 'gutter copies path:line', await page.evaluate(() => navigator.clipboard.readText()));
+
+  // bytecode
+  await page.evaluate(() => openFile('demo/mod/ScanDemo.java'));
+  await waitCode(/class ScanDemo/);
+  await page.click('#bc');
+  ok(await waitCode(/INVOKEVIRTUAL|INVOKESTATIC|GETSTATIC/), 'bytecode view');
+  await page.click('#bc');
+  ok(await waitCode(/class ScanDemo/), 'back to source');
+
+  // tabs: close
+  await page.keyboard.press('Alt+w');
+  await page.waitForTimeout(200);
+  ok(await page.$$eval('#ftabs .ftab', t => t.length) >= 1 && !/ScanDemo/.test(await page.textContent('#cpath')), 'alt+w closes tab');
+
+  // resource view + json pretty
+  await page.evaluate(() => openFile('fabric.mod.json'));
+  ok(await waitCode(/"schemaVersion": 1/), 'json resource');
+
+  // downloads
+  const [dz] = await Promise.all([page.waitForEvent('download'), page.click('#dl')]);
+  const zpath = path.join(SHOTS, dz.suggestedFilename()); await dz.saveAs(zpath);
+  ok(dz.suggestedFilename() === 'sample-src.zip' && fs.statSync(zpath).size > 1000, 'zip download');
+  const [dr] = await Promise.all([page.waitForEvent('download'), page.click('#report')]);
+  const rp = path.join(SHOTS, dr.suggestedFilename()); await dr.saveAs(rp);
+  const rep = JSON.parse(fs.readFileSync(rp, 'utf8'));
+  ok(rep.scan.level === 'high' && rep.java.classes === 5 && rep.file.sha256, 'report json');
+
+  // retry with CFR
+  await reset();
+  await page.click('#retry');
+  ok(!(await waitState(/^done · CFR/)), 'retry with CFR', await state());
+  ok(await waitCode(/Decompiled with CFR|class|\{/), 'cfr output shown');
+
+  // ---------------- wrapped exe
+  console.log('wrapped exe');
+  await sample('sample-wrapped.exe');
+  ok(!(await waitState(/^done/)), 'exe decompiled', await state());
+  ok(/embedded Java jar/.test(await page.textContent('#ftags')) && /Launch4j/.test(await page.textContent('#ftags')), 'exe tags');
+  await page.click('.rtab[data-view=details]');
+  ok(/PORTABLE EXECUTABLE/.test(await page.textContent('#details')) && /Found a jar inside/.test(await page.textContent('#details')), 'pe + embedded details');
+  ok(!(await page.$eval('.rtab[data-view=strings]', e => e.hidden)), 'strings tab visible');
+  await shot('04-exe');
+
+  // ---------------- apk
+  console.log('apk');
+  await sample('sample.apk');
+  ok(!(await waitState(/^done/)), 'apk decompiled', await state());
+  ok(/Android package/.test(await page.textContent('#ftype')), 'apk type');
+  ok(/dev\.ezlarp\.sample/.test(await page.textContent('#ftags')), 'apk package tag');
+  ok(/App\.java/.test(await page.textContent('#tree')) && /AndroidManifest\.xml/.test(await page.textContent('#tree')), 'apk tree');
+  await page.click('.rtab[data-view=details]');
+  const ad = await page.textContent('#details');
+  ok(/READ_CONTACTS/.test(ad) && /24 \/ 34/.test(ad) && /1\.2\.0/.test(ad), 'apk details', ad.slice(0, 300));
+  await page.click('.rtab[data-view=source]');
+  await page.evaluate(() => openFile('AndroidManifest.xml'));
+  ok(await waitCode(/<manifest[\s\S]*uses-permission/), 'manifest decoded in viewer');
+  await page.evaluate(() => openFile('demo/App.java'));
+  ok(await waitCode(/HELLO/), 'apk source');
+  await shot('05-apk');
+
+  // ---------------- dex, single class, multi-class
+  console.log('dex / class');
+  await drop('app.dex');
+  ok(!(await waitState(/^done/)), 'dex', await state());
+  ok(/Android DEX/.test(await page.textContent('#ftype')), 'dex type');
+  await drop('one.class');
+  ok(!(await waitState(/^done/)), 'single class', await state());
+  ok(await waitCode(/class ExampleMod/), 'single class source');
+  await drop(['one.class', 'cls/demo/mod/Config.class']);
+  ok(!(await waitState(/^done/)), 'multi class', await state());
+  ok(/2 class files/.test(await page.textContent('#fname')), 'multi class name');
+
+  // ---------------- nested
+  console.log('nested');
+  await drop('nested.jar');
+  ok(!(await waitState(/^done/)), 'nested outer', await state());
+  await page.evaluate(() => openFile('inner-mod.jar'));
+  await page.waitForSelector('#openjar:not([hidden])');
+  await reset();
+  await page.click('#openjar');
+  ok(!(await waitState(/^done/)), 'nested inner opened', await state());
+  ok(/nested\.jar/.test(await page.textContent('#banner')) && /inner-mod\.jar/.test(await page.textContent('#fname')), 'breadcrumb');
+  await page.click('#banner [data-up]');
+  await page.waitForTimeout(300);
+  ok(/nested\.jar/.test(await page.textContent('#fname')) && /readme\.txt/.test(await page.textContent('#tree')), 'back to parent');
+
+  // ---------------- native exe
+  console.log('native exe');
+  await drop('native.exe');
+  ok(!(await waitState(/analysis done/)), 'native exe', await state());
+  ok(await page.$eval('#ficon', e => !e.hidden), 'exe icon shown');
+  await page.click('.rtab[data-view=strings]');
+  await page.fill('#sq', 'kernel32');
+  await page.waitForTimeout(300);
+  ok(/kernel32/i.test(await page.textContent('#strings')), 'strings filter');
+  await page.click('.rtab[data-view=details]');
+  ok(/IMPORTS/.test(await page.textContent('#details')) && /asInvoker/.test(await page.textContent('#details')), 'imports + UAC level');
+  await shot('06-native');
+
+  // ---------------- junk
+  console.log('junk');
+  await drop('junk.bin');
+  const jerr = await waitState(/error/);
+  ok(/unsupported file type/.test(jerr), 'junk rejected');
+
+  // ---------------- batch
+  console.log('batch');
+  await drop(['mods-a.jar', 'clean-lib.jar', 'native.exe', 'sample-wrapped.exe', 'junk.bin']);
+  ok(!(await waitState(/^batch done/)), 'batch done', await state());
+  const rows = await page.$$eval('#scan table.batch tr.brow', r => r.map(x => x.textContent));
+  ok(rows.length === 5, 'batch rows', rows.length);
+  ok(/^HIGH/.test(rows[0]) && /SKIPPED/.test(rows[rows.length - 1]), 'batch sorted by risk', rows.map(r => r.slice(0, 40)));
+  ok(rows.some(r => /^CLEAN.*clean-lib\.jar/.test(r)), 'clean jar clean');
+  ok(rows.some(r => /EZLARP Sample Mod/.test(r)), 'batch shows mod name');
+  ok(/high-risk|of 5 files/.test(await page.textContent('#verdict')), 'batch verdict', await page.textContent('#verdict'));
+  await shot('09-batch');
+  await reset();
+  await page.click('#scan table.batch tr.brow');
+  ok(!(await waitState(/^done/)), 'open batch item', await state());
+  ok(/5 files/.test(await page.textContent('#banner')), 'batch breadcrumb');
+  await page.click('#banner [data-up]');
+  await page.waitForTimeout(300);
+  ok(await page.$$eval('#scan table.batch tr.brow', r => r.length) === 5, 'back to batch');
+
+  // ---------------- recent scans survive a reload
+  await page.reload();
+  ok(!(await page.$eval('#recent', e => e.hidden)) && /sample\.jar|mods-a\.jar/.test(await page.textContent('#recentlist')), 'recent scans listed');
+  await shot('10-recent');
+
+  // ---------------- big jar: on-demand mode
+  console.log('big jar (lazy)');
+  await drop('big.jar');
+  ok(!(await waitState(/^ready/, 180000)), 'lazy ready', await state());
+  ok(!(await page.$eval('#decall', e => e.hidden)), 'decompile-all button', await page.evaluate(() => JSON.stringify({ st: el.fstate.textContent, lazy: S.lazy, name: S.name, pend: pendingCount(), err: el.err.hidden ? '' : el.err.textContent })));
+  ok(/decompile when you open them/.test(await page.textContent('#banner')), 'lazy banner');
+  ok(await waitCode(/class Main|public class/, 120000), 'entry class decompiled on demand');
+  await page.click('#qmode [data-m=files]');
+  await page.fill('#q', 'CfrDriver.java');
+  await page.waitForTimeout(200);
+  await page.press('#q', 'Enter');
+  ok(await waitCode(/interface CfrDriver/, 120000), 'clicked class decompiles on demand');
+  await shot('07-lazy');
+
+  // ---------------- mobile
+  await page.setViewportSize({ width: 390, height: 844 });
+  await sample('sample.jar');
+  await waitState(/^done/);
+  await shot('08-mobile');
+
+  ok(errors.length === 0, 'no page errors', errors.slice(0, 5));
+  console.log(`\n${pass} passed, ${fail} failed`);
+  await browser.close();
+  process.exit(fail ? 1 : 0);
+})().catch(e => { console.error(e); process.exit(2); });
