@@ -600,7 +600,7 @@ async function openFile(path, opts = {}) {
 function showPlaceholder(text) {
   el.codebox.classList.add('loading');
   el.cmeta.textContent = 'working…';
-  renderCode(text, '');
+  renderCode(text, '', true);
 }
 
 function showImage(f) {
@@ -618,7 +618,8 @@ function showImage(f) {
   el.preview.appendChild(img);
 }
 
-function renderCode(text, lang) {
+function renderCode(text, lang, placeholder) {
+  if (!placeholder) el.codebox.classList.remove('loading');
   const n = text.split('\n').length;
   let g = '';
   for (let i = 1; i <= n; i++) g += i + '\n';

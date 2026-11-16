@@ -118,6 +118,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await page.click('.usage-head a');
 
   // line number click copies path:line
+  await page.$eval('#codebox', c => { c.scrollTop = 0; });
   await page.mouse.click(...await page.$eval('#gutter', g => { const r = g.getBoundingClientRect(); return [r.left + r.width / 2, r.top + 14 + 19 * 2 + 5]; }));
   await page.waitForTimeout(200);
   ok(/^demo\/mod\/ExampleMod\.java:3$/.test(await page.evaluate(() => navigator.clipboard.readText())), 'gutter copies path:line', await page.evaluate(() => navigator.clipboard.readText()));
@@ -127,6 +128,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await waitCode(/class ScanDemo/);
   await page.click('#bc');
   ok(await waitCode(/INVOKEVIRTUAL|INVOKESTATIC|GETSTATIC/), 'bytecode view');
+  ok(!(await page.$eval('#codebox', e => e.classList.contains('loading'))), 'bytecode not dimmed');
   await page.click('#bc');
   ok(await waitCode(/class ScanDemo/), 'back to source');
 
@@ -174,6 +176,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await page.click('.rtab[data-view=details]');
   const ad = await page.textContent('#details');
   ok(/READ_CONTACTS/.test(ad) && /24 \/ 34/.test(ad) && /1\.2\.0/.test(ad), 'apk details', ad.slice(0, 300));
+  ok(/Sensitive Android permissions/.test(await page.textContent('#scan')), 'apk permission finding');
   await page.click('.rtab[data-view=source]');
   await page.evaluate(() => openFile('AndroidManifest.xml'));
   ok(await waitCode(/<manifest[\s\S]*uses-permission/), 'manifest decoded in viewer');

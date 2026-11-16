@@ -6,7 +6,8 @@
 const HELPER = '/app/ezlarp-helper-v2.jar';
 const CP_DECOMPILE = `${HELPER}:/app/vineflower-1.12.0.jar:/app/cfr-0.152.jar`;
 const CP_D2J = `${HELPER}:/app/d2j-bundle-2.4.jar`;
-const LAZY_OVER = 150;          // classes; above this, decompile on demand
+// source files; above this, decompile on demand (#lazy=N in the URL overrides, handy for testing)
+const LAZY_OVER = +((/[#&]lazy=(\d+)/.exec(location.hash) || [])[1] || 150);
 const MD5_MAX = 256 * 1024 * 1024;
 
 // ------------------------------------------------------------------ prefs

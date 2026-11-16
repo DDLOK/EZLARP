@@ -94,8 +94,8 @@ input[type=checkbox]{accent-color:var(--accent)}
 .empty{padding:14px;color:var(--mute);font:12px var(--mono)}
 
 .pane{display:flex;flex-direction:column;min-width:0;min-height:0}
-.pane-head{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);font:12px var(--mono)}
-.pane-head .path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg);flex:1;min-width:0}
+.pane-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:6px 10px;border-bottom:1px solid var(--line);font:12px var(--mono)}
+.pane-head .path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg);flex:1 1 160px;min-width:120px}
 .meta{color:var(--dim);font:11px var(--mono);white-space:nowrap}
 .codebox{flex:1;display:flex;overflow:auto;background:#0b0b0b;min-height:0}
 .codebox pre{margin:0;padding:14px 0;font-family:var(--mono);font-size:12.5px;line-height:1.55}
