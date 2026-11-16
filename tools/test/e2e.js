@@ -265,6 +265,9 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await page.waitForTimeout(200);
   await page.press('#q', 'Enter');
   ok(await waitCode(/interface CfrDriver/, 120000), 'clicked class decompiles on demand');
+  await page.fill('#q', '');
+  await page.press('#q', 'Escape');
+  ok(/\(2 decompiled\)/.test(await page.textContent('#sidefoot')), 'footer counts decompiled', await page.textContent('#sidefoot'));
   await shot('07-lazy');
 
   // ---------------- mobile

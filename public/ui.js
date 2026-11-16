@@ -257,12 +257,16 @@ function countFiles(node) {
   return n;
 }
 
-function renderTree() {
-  el.tree.innerHTML = '';
+function updateFoot() {
   const files = [...S.files.values()];
   const srcCount = files.filter(f => f.type === 'src').length;
   const done = files.filter(f => f.type === 'src' && f.text != null).length;
   el.sidefoot.textContent = `${srcCount} sources${S.lazy ? ` (${done} decompiled)` : ''} · ${S.files.size - srcCount} resources`;
+}
+
+function renderTree() {
+  el.tree.innerHTML = '';
+  updateFoot();
   const q = el.q.value.trim();
   if (!q && S.usagesOf) return renderUsages(S.usagesOf);
   if (q && S.qmode === 'files') return renderFileFilter(q);
@@ -555,6 +559,7 @@ async function openFile(path, opts = {}) {
         renderBanner();
         el.decall.hidden = !(S.lazy && pendingCount() > 0);
         markTree();
+        if (!el.q.value.trim() && !S.usagesOf) updateFoot();
       }
       el.codebox.classList.remove('loading');
       text = f.text != null ? f.text : `// ${ENGINES[S.engine]} could not decompile this class\n// ${String(f.error).split('\n').join('\n// ')}\n// try "retry with" the other engine, or view the bytecode`;
