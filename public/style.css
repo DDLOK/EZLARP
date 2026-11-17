@@ -314,3 +314,6 @@ table.batch .hits{color:#bbb;font-size:11px}
 .cmp-list a.del::before{content:"− ";color:var(--danger)}
 .cmp-list a.chg::before{content:"~ ";color:var(--warn)}
 .finding.new{box-shadow:inset 0 0 0 1px #4a2228}
+
+.ioc .w a{color:var(--accent2);cursor:pointer}
+.ioc .w a:hover{text-decoration:underline}

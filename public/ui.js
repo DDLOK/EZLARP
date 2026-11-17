@@ -990,6 +990,17 @@ function renderDetails() {
   if (S.apk) h += apkDetails();
   if (S.dex) h += section('DEX FILE', kv([['format version', S.dex.version], ['classes', S.dex.classes], ['methods', S.dex.methods], ['strings', S.dex.strings]]));
   if (S.cls) h += section('CLASS FILE', kv([['class', esc(dots(S.cls.name || '?'))], ['bytecode', esc(Inspect.javaVersion(S.cls.major)) + ` (major ${S.cls.major}, minor ${S.cls.minor})`], ['superclass', S.cls.superName ? esc(dots(S.cls.superName)) : null]]));
+  if (S.modrinth) {
+    const m = S.modrinth, prev = modrinthPrevious();
+    const cur = m.versions.find(v => v.id === m.current) || {};
+    h += section('MODRINTH', kv([
+      ['project', `<a class="link" href="https://modrinth.com/${esc(m.kind)}/${esc(m.slug)}" target="_blank" rel="noopener">${esc(m.slug)} ↗</a>`],
+      ['this version', esc(cur.version_number || '?') + ` <span style="color:var(--dim)">· ${esc((cur.loaders || []).join(', '))} · ${esc((cur.game_versions || []).slice(-3).join(', '))}</span>`],
+      ['published', cur.date_published ? esc(cur.date_published.slice(0, 10)) : null],
+    ]) + (prev ? `<button class="btn" data-mrcmp="${esc(prev.id)}" style="margin:10px 0">compare with previous release (${esc(prev.version_number)})</button>` : '') +
+      '<div class="ioc">' + m.versions.slice(0, 40).map(v => `<div><span class="u" style="${v.id === m.current ? 'color:var(--fg)' : ''}">${esc(v.version_number)} <span style="color:var(--dim)">· ${esc(v.loaders.join(', '))} · ${esc(v.game_versions.slice(-2).join(', '))}</span></span>` +
+        (v.id === m.current ? '<span class="w">open now</span>' : `<span class="w"><a data-mropen="${esc(v.id)}">open</a> · <a data-mrcmp="${esc(v.id)}">compare</a></span>`) + '</div>').join('') + '</div>');
+  }
   if (S.mrpack) {
     const m = S.mrpack;
     h += section('MODRINTH MODPACK', kv([
@@ -1014,6 +1025,8 @@ function renderDetails() {
   for (const a of el.details.querySelectorAll('[data-cls]')) a.onclick = () => openClass(a.dataset.cls);
   for (const a of el.details.querySelectorAll('[data-open]')) a.onclick = () => openNested(a.dataset.open);
   for (const a of el.details.querySelectorAll('[data-py]')) a.onclick = () => extractPy(+a.dataset.py);
+  for (const a of el.details.querySelectorAll('[data-mrcmp]')) a.onclick = () => compareModrinth(a.dataset.mrcmp);
+  for (const a of el.details.querySelectorAll('[data-mropen]')) a.onclick = () => openModrinthVersion(a.dataset.mropen);
   const ms = el.details.querySelector('#mrscan');
   if (ms) ms.onclick = () => scanMrpack();
   const sn = el.details.querySelector('#scannested');

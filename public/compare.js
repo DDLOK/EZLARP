@@ -54,7 +54,8 @@ async function indexSide(classZip, resZip, label) {
   return { classes, res, scan, sum: Scan.summarize(scan) };
 }
 
-async function compareWith(name, u8) {
+// reverse=true: the given file is the OLD version and the open file is the new one
+async function compareWith(name, u8, reverse) {
   if (busy || !S.jarInfo) return;
   setBusy(true);
   el.err.hidden = true;
@@ -63,8 +64,9 @@ async function compareWith(name, u8) {
     setState(`reading ${name}`, null);
     const b = await toJarBytes(name, u8);
     const bZip = await JSZip.loadAsync(b.jar);
-    const A = await indexSide(S.jarInfo.zip, S.jarInfo.rz, S.name);
-    const B = await indexSide(bZip, b.res || bZip, name);
+    let A = await indexSide(S.jarInfo.zip, S.jarInfo.rz, S.name);
+    let B = await indexSide(bZip, b.res || bZip, name);
+    if (reverse) [A, B] = [B, A];
     const diff = (ma, mb) => {
       const added = [], removed = [], changed = [];
       for (const [k, v] of mb) { const o = ma.get(k); if (!o) added.push(k); else if (o.hash !== v.hash) changed.push(k); }
@@ -86,7 +88,7 @@ async function compareWith(name, u8) {
     const urlsNew = [...B.scan.urls.keys()].filter(u => !A.scan.urls.has(u));
     const urlsGone = [...A.scan.urls.keys()].filter(u => !B.scan.urls.has(u));
     const bPath = `/str/cmp-${uid()}.jar`;
-    S.cmp = { name, A, B, bZip, bJarBytes: b.jar, bPath, bLoaded: false, cls, res, newHits, goneHits, urlsNew, urlsGone };
+    S.cmp = { name, reverse: !!reverse, A, B, other: { zip: bZip, jar: b.jar, path: bPath, loaded: false }, cls, res, newHits, goneHits, urlsNew, urlsGone };
     renderCompare();
     el.rtabs.querySelector('[data-view=compare]').hidden = false;
     showView('compare');
@@ -104,7 +106,8 @@ function renderCompare() {
   const c = S.cmp;
   if (!c) return;
   const lvl = c.newHits.some(h => h.rule.sev === 'high') ? 'high' : c.newHits.some(h => h.rule.sev === 'med') ? 'med' : c.newHits.length ? 'low' : 'none';
-  let h = `<section><div class="note"><b>${esc(S.name)}</b> → <b>${esc(c.name)}</b>. "New" means present in the second file but not the first.
+  const nameA = c.reverse ? c.name : S.name, nameB = c.reverse ? S.name : c.name;
+  let h = `<section><div class="note"><b>${esc(nameA)}</b> → <b>${esc(nameB)}</b>. "New" means present in the second file but not the first.
     ${lvl === 'high' ? '<br><span style="color:var(--danger)">The new version adds high-risk indicators. Read the classes listed below before using it.</span>' : ''}</div></section>`;
   h += `<section><div class="scan-sum">
     <div class="pill ok"><b>+${c.cls.added.length}</b>classes added</div>
@@ -144,24 +147,25 @@ function renderCompare() {
   for (const a of el.cmpview.querySelectorAll('[data-rdiff]')) a.onclick = () => resourceDiff(a.dataset.rdiff);
 }
 
-// ---- source of a class on side B (decompiled with B's jar as library)
+// ---- source of a class in the other file (decompiled with its jar as library)
 
-async function sideBSource(srcPath) {
-  const c = S.cmp;
-  const group = [...c.B.classes.values()].filter(v => v.src === srcPath);
+async function otherSource(srcPath) {
+  const c = S.cmp, o = c.other;
+  const side = c.reverse ? c.A : c.B;
+  const group = [...side.classes.values()].filter(v => v.src === srcPath);
   if (!group.length) return null;
   await ensureJVM();
-  if (!c.bLoaded) { cheerpOSAddStringFile(c.bPath, c.bJarBytes); c.bLoaded = true; }
+  if (!o.loaded) { cheerpOSAddStringFile(o.path, o.jar); o.loaded = true; }
   const z = new JSZip();
   for (const g of group) z.file(g.entry.name, await g.entry.async('uint8array'));
   const inPath = `/str/cmpone-${uid()}.jar`;
   cheerpOSAddStringFile(inPath, await z.generateAsync({ type: 'uint8array', compression: 'STORE' }));
-  const out = await runDecompiler(S.engine, inPath, ['ezlarp.lib=' + c.bPath]);
+  const out = await runDecompiler(S.engine, inPath, ['ezlarp.lib=' + o.path]);
   const key = Object.keys(out.sources).find(k => k === srcPath || srcPath.endsWith('/' + k)) || Object.keys(out.sources)[0];
   return out.sources[key];
 }
 
-async function sideASource(srcPath) {
+async function openSource(srcPath) {
   const f = S.files.get(srcPath);
   if (!f || f.type !== 'src') return null;
   await ensureSource(f);
@@ -175,8 +179,8 @@ async function classDiff(internal) {
   showView('source');
   showPlaceholder(`// decompiling both versions of ${baseOf(srcPath)}…`);
   try {
-    const [a, b] = await Promise.all([sideASource(srcPath), sideBSource(srcPath)]);
-    showDiff(vpath, a, b, srcPath);
+    const mine = await openSource(srcPath), other = await otherSource(srcPath);
+    if (c.reverse) showDiff(vpath, other, mine, srcPath); else showDiff(vpath, mine, other, srcPath);
   } catch (e) {
     renderCode('// could not build the diff: ' + (e.message || e), '');
   }
@@ -191,7 +195,8 @@ async function resourceDiff(path) {
 
 function showDiff(vpath, a, b, label) {
   const al = a == null ? [] : a.split('\n'), bl = b == null ? [] : b.split('\n');
-  const { text, plus, minus } = unifiedDiff(al, bl, label, S.name, S.cmp.name);
+  const c = S.cmp;
+  const { text, plus, minus } = unifiedDiff(al, bl, label, c.reverse ? c.name : S.name, c.reverse ? S.name : c.name);
   S.files.set(vpath, { path: vpath, type: 'diff', virtual: true, text, meta: `diff · +${plus} −${minus}` });
   openFile(vpath);
 }

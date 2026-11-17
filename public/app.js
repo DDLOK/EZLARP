@@ -64,7 +64,8 @@ async function resolveLink(raw) {
     const v = mr[3] ? versions.find(x => x.id === mr[3] || x.version_number === decodeURIComponent(mr[3])) : versions[0];
     if (!v) throw new Error(`version "${mr[3]}" not found on Modrinth`);
     const file = v.files.find(f => f.primary) || v.files[0];
-    return { url: file.url, name: file.filename, source: `Modrinth · ${mr[2]} ${v.version_number}`, sha1: file.hashes && file.hashes.sha1 };
+    return { url: file.url, name: file.filename, source: `Modrinth · ${mr[2]} ${v.version_number}`, sha1: file.hashes && file.hashes.sha1,
+      modrinth: { slug: mr[2], kind: mr[1].toLowerCase(), versions, current: v.id } };
   }
   // GitHub file pages -> raw (raw.githubusercontent.com allows cross-site downloads)
   const gh = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/(?:blob|raw)\/(.+)$/i.exec(url);
@@ -99,6 +100,40 @@ async function fetchBytes(url, label, onProgress) {
   return out;
 }
 
+// Modrinth: the version to compare against = the newest older version sharing a loader
+function modrinthPrevious() {
+  const m = S.modrinth;
+  if (!m) return null;
+  const i = m.versions.findIndex(v => v.id === m.current);
+  const cur = m.versions[i];
+  if (!cur) return null;
+  return m.versions.slice(i + 1).find(v => v.loaders.some(l => cur.loaders.includes(l))) || m.versions[i + 1] || null;
+}
+
+async function compareModrinth(versionId) {
+  if (busy) return;
+  const v = S.modrinth.versions.find(x => x.id === versionId);
+  const file = v && (v.files.find(f => f.primary) || v.files[0]);
+  if (!file) return;
+  try {
+    setBusy(true);
+    const u8 = await fetchBytes(file.url, file.filename, (got, total) => setState(`downloading ${file.filename} ${human(got)}${total ? ' / ' + human(total) : ''}`, null));
+    if (file.hashes && file.hashes.sha1 && await sha1hex(u8) !== file.hashes.sha1) throw new Error('downloaded file does not match the hash Modrinth published for it');
+    setBusy(false);
+    // compare old -> current, so "new indicators" means "added by the current version"
+    await compareWith(file.filename, u8, true);
+  } catch (e) {
+    setBusy(false);
+    showError(e.message || String(e));
+  }
+}
+
+function openModrinthVersion(versionId) {
+  const m = S.modrinth;
+  el.url.value = `https://modrinth.com/${m.kind}/${m.slug}/version/${versionId}`;
+  loadUrl(el.url.value);
+}
+
 async function sha1hex(u8) {
   return [...new Uint8Array(await crypto.subtle.digest('SHA-1', u8))].map(b => b.toString(16).padStart(2, '0')).join('');
 }
@@ -117,7 +152,7 @@ async function loadUrl(raw) {
     if (link.sha1 && await sha1hex(u8) !== link.sha1) throw new Error('downloaded file does not match the hash Modrinth published for it');
     setBusy(false);
     stack.length = 0;
-    await analyze(link.name, u8, { source: link.source });
+    await analyze(link.name, u8, { source: link.source, modrinth: link.modrinth });
   } catch (e) {
     setBusy(false);
     setState('error', 100);
@@ -191,6 +226,7 @@ async function analyze(name, u8, opts = {}) {
   setState('reading', 3);
   hashes(u8, !!opts.multiClass);
   if (opts.source) { S.source = opts.source; tag('from ' + opts.source, 'java'); }
+  if (opts.modrinth) S.modrinth = opts.modrinth;
 
   try {
     let kind = Inspect.sniff(u8, name);

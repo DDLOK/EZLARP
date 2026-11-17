@@ -307,6 +307,20 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   ok(await page.$$eval('#code .hljs-deletion', x => x.length) === 1 && await page.$$eval('#code .hljs-addition', x => x.length) === 1, 'diff colored');
   await shot('13-diff');
 
+  // reverse compare (what "compare with previous release" does): open file is the NEW one
+  await drop('mods-a.jar');
+  await waitState(/^done/);
+  const oldBytes = [...fs.readFileSync(path.join(FX, 'sample-old.jar'))];
+  await page.evaluate(b => compareWith('sample-old.jar', new Uint8Array(b), true), oldBytes);
+  await page.waitForSelector('#cmpview .scan-sum', { timeout: 60000 });
+  const rc = await page.textContent('#cmpview');
+  ok(/sample-old\.jar\s*→\s*mods-a\.jar/.test(rc) && /Discord webhook URL/.test(rc) && /\+1\s*classes added/.test(rc), 'reverse compare', rc.slice(0, 300));
+  await page.click('#cmpview a[data-cdiff="demo/mod/ScanDemo"]');
+  ok(await waitCode(/^--- sample-old\.jar[\s\S]*\+\s*static final String FAKE_WEBHOOK/), 'reverse diff direction');
+  await page.click('.rtab[data-view=compare]');
+  await page.click('#cmpview a[data-rdiff="fabric.mod.json"]');
+  ok(await waitCode(/-\s*"version": "0\.9\.0"[\s\S]*\+\s*"version": "1\.0\.0"/), 'reverse resource diff');
+
   // ---------------- batch
   console.log('batch');
   await drop(['mods-a.jar', 'clean-lib.jar', 'native.exe', 'sample-wrapped.exe', 'junk.bin']);
