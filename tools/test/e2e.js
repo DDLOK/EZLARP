@@ -327,7 +327,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await page.setInputFiles('#cmpfile', path.join(FX, 'nested-new.jar'));
   await page.waitForSelector('#cmpview .scan-sum', { timeout: 60000 });
   const nc = await page.textContent('#cmpview');
-  ok(/\+1\s*classes added/.test(nc) && /Discord webhook URL/.test(nc) && /inner-mod\.jar!demo\.mod\.ScanDemo/.test(nc), 'nested compare', nc.slice(0, 500));
+  ok(/\+1\s*classes added/.test(nc) && /Discord webhook URL/.test(nc) && /inner-mod › demo\.mod\.ScanDemo/.test(nc), 'nested compare', nc.slice(0, 500));
   await page.click('#cmpview a[data-cdiff="META-INF/jars/inner-mod.jar!demo/mod/ScanDemo"]');
   ok(await waitCode(/\+\s*static final String FAKE_WEBHOOK/), 'nested class diff');
   await page.click('.rtab[data-view=compare]');

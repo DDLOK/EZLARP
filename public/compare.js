@@ -86,7 +86,8 @@ async function compareWith(name, u8, reverse) {
   if (busy || !S.jarInfo) return;
   setBusy(true);
   el.err.hidden = true;
-  const prevState = el.fstate.textContent;
+  const prevState = compareWith.restoreState || el.fstate.textContent;
+  compareWith.restoreState = null;
   try {
     setState(`reading ${name}`, null);
     const b = await toJarBytes(name, u8);
@@ -131,6 +132,12 @@ async function compareWith(name, u8, reverse) {
 function renderCompare() {
   const c = S.cmp;
   if (!c) return;
+  const label = (x, isClass) => {
+    const bang = x.indexOf('!');
+    const rest = bang < 0 ? x : x.slice(bang + 1);
+    const pre = bang < 0 ? '' : `<span style="color:var(--dim)">${esc(baseOf(x.slice(0, bang)).replace(/\.jar$/, ''))} › </span>`;
+    return pre + esc(isClass ? dots(rest) : rest);
+  };
   const lvl = c.newHits.some(h => h.rule.sev === 'high') ? 'high' : c.newHits.some(h => h.rule.sev === 'med') ? 'med' : c.newHits.length ? 'low' : 'none';
   const nameA = c.reverse ? c.name : S.name, nameB = c.reverse ? S.name : c.name;
   let h = `<section><div class="note"><b>${esc(nameA)}</b> → <b>${esc(nameB)}</b>. "New" means present in the second file but not the first.
@@ -148,7 +155,7 @@ function renderCompare() {
     for (const nh of c.newHits) {
       h += `<details class="finding ${nh.rule.sev} new" open><summary><span class="sev">${nh.rule.sev.toUpperCase()}</span><span>${esc(nh.rule.title)}${nh.brandNew ? ' <span style="color:var(--dim)">(not in the old version at all)</span>' : ''}</span><span class="cnt">${plural(nh.where.length, 'new place')}</span></summary><div class="body"><div class="why">${esc(nh.rule.why)}</div>`;
       for (const w of nh.where.slice(0, 40)) {
-        h += `<div class="loc"><a data-cdiff="${esc(w)}">${esc(dots(w))}</a></div>`;
+        h += `<div class="loc"><a data-cdiff="${esc(w)}" title="${esc(w)}">${label(w, true)}</a></div>`;
         for (const ev of nh.ev.get(w) || []) h += `<div class="ev">${esc(ev)}</div>`;
       }
       h += '</div></details>';
@@ -161,12 +168,12 @@ function renderCompare() {
   if (c.urlsNew.length) h += section(`NEW URLS · ${c.urlsNew.length}`, '<div class="ioc">' + c.urlsNew.slice(0, 200).map(u => `<div><span class="u">${esc(u)}</span></div>`).join('') + '</div>');
   if (c.urlsGone.length) h += section(`REMOVED URLS · ${c.urlsGone.length}`, '<div class="ioc">' + c.urlsGone.slice(0, 200).map(u => `<div><span class="u" style="color:var(--dim)">${esc(u)}</span></div>`).join('') + '</div>');
 
-  const list = (items, cls, attr) => `<div class="cmp-list">${items.slice(0, 1500).map(x => `<a class="${cls}" ${attr}="${esc(x)}" title="${esc(x)}">${esc(attr === 'data-cdiff' ? dots(x) : x)}</a>`).join('')}${items.length > 1500 ? `<span class="meta">… ${items.length - 1500} more</span>` : ''}</div>`;
+  const list = (items, cls, attr) => `<div class="cmp-list">${items.slice(0, 1500).map(x => `<a class="${cls}" ${attr}="${esc(x)}" title="${esc(x)}">${label(x, attr === 'data-cdiff')}</a>`).join('')}${items.length > 1500 ? `<span class="meta">… ${items.length - 1500} more</span>` : ''}</div>`;
   if (c.cls.changed.length) h += section(`CHANGED CLASSES · ${c.cls.changed.length} (click for a source diff)`, list(c.cls.changed, 'chg', 'data-cdiff'));
   if (c.cls.added.length) h += section(`ADDED CLASSES · ${c.cls.added.length}`, list(c.cls.added, 'add', 'data-cdiff'));
   if (c.cls.removed.length) h += section(`REMOVED CLASSES · ${c.cls.removed.length}`, list(c.cls.removed, 'del', 'data-cdiff'));
   const resAll = [...c.res.changed.map(x => ['chg', x]), ...c.res.added.map(x => ['add', x]), ...c.res.removed.map(x => ['del', x])];
-  if (resAll.length) h += section(`CHANGED RESOURCES · ${resAll.length}`, `<div class="cmp-list">${resAll.slice(0, 1000).map(([k, x]) => `<a class="${k}" data-rdiff="${esc(x)}">${esc(x)}</a>`).join('')}</div>`);
+  if (resAll.length) h += section(`CHANGED RESOURCES · ${resAll.length}`, `<div class="cmp-list">${resAll.slice(0, 1000).map(([k, x]) => `<a class="${k}" data-rdiff="${esc(x)}" title="${esc(x)}">${label(x, false)}</a>`).join('')}</div>`);
   h += '<div class="disclaimer">Classes are compared by their bytes, so a recompile with no code change can still show up as "changed". Indicators come from the same static rules as the SCAN tab.</div>';
   el.cmpview.innerHTML = h;
   for (const a of el.cmpview.querySelectorAll('[data-cdiff]')) a.onclick = () => classDiff(a.dataset.cdiff);
