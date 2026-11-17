@@ -321,6 +321,19 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await page.click('#cmpview a[data-rdiff="fabric.mod.json"]');
   ok(await waitCode(/-\s*"version": "0\.9\.0"[\s\S]*\+\s*"version": "1\.0\.0"/), 'reverse resource diff');
 
+  // compare looks inside nested jars and pairs them across versions
+  await drop('nested-old.jar');
+  await waitState(/^done/);
+  await page.setInputFiles('#cmpfile', path.join(FX, 'nested-new.jar'));
+  await page.waitForSelector('#cmpview .scan-sum', { timeout: 60000 });
+  const nc = await page.textContent('#cmpview');
+  ok(/\+1\s*classes added/.test(nc) && /Discord webhook URL/.test(nc) && /inner-mod\.jar!demo\.mod\.ScanDemo/.test(nc), 'nested compare', nc.slice(0, 500));
+  await page.click('#cmpview a[data-cdiff="META-INF/jars/inner-mod.jar!demo/mod/ScanDemo"]');
+  ok(await waitCode(/\+\s*static final String FAKE_WEBHOOK/), 'nested class diff');
+  await page.click('.rtab[data-view=compare]');
+  await page.click('#cmpview a[data-rdiff="META-INF/jars/inner-mod.jar!fabric.mod.json"]');
+  ok(await waitCode(/-\s*"version": "0\.9\.0"/), 'nested resource diff');
+
   // ---------------- batch
   console.log('batch');
   await drop(['mods-a.jar', 'clean-lib.jar', 'native.exe', 'sample-wrapped.exe', 'junk.bin']);

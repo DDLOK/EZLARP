@@ -33,6 +33,15 @@ javac --release 8 -Xlint:-options -d clean/out clean/demo/Lib.java && jar --crea
 mkdir -p nest/META-INF/jars && cp "$P/samples/sample.jar" nest/META-INF/jars/inner-mod.jar && cp native.exe nest/lib-native.dll \
   && echo hello > nest/readme.txt && (cd nest && jar --create --file ../nested.jar .)
 
+# two versions of a mod that keeps its code in a nested jar (compare must look inside)
+for v in old new; do
+  mkdir -p nv/META-INF/jars && rm -f nv/META-INF/jars/*
+  if [ $v = old ]; then cp sample-old.jar nv/META-INF/jars/inner-mod-0.9.0+abc123.jar; else cp "$P/samples/sample.jar" nv/META-INF/jars/inner-mod-1.0.0+def456.jar; fi
+  echo '{"schemaVersion":1,"id":"wrapper","version":"1"}' > nv/fabric.mod.json
+  rm -f nested-$v.jar && (cd nv && jar --create --file ../nested-$v.jar .)
+done
+rm -rf nv
+
 # dex (from the apk sample)
 unzip -p "$P/samples/sample.apk" classes.dex > app.dex
 

@@ -115,15 +115,18 @@ async function compareModrinth(versionId) {
   const v = S.modrinth.versions.find(x => x.id === versionId);
   const file = v && (v.files.find(f => f.primary) || v.files[0]);
   if (!file) return;
+  const before = el.fstate.textContent;
   try {
     setBusy(true);
     const u8 = await fetchBytes(file.url, file.filename, (got, total) => setState(`downloading ${file.filename} ${human(got)}${total ? ' / ' + human(total) : ''}`, null));
     if (file.hashes && file.hashes.sha1 && await sha1hex(u8) !== file.hashes.sha1) throw new Error('downloaded file does not match the hash Modrinth published for it');
     setBusy(false);
     // compare old -> current, so "new indicators" means "added by the current version"
+    compareWith.restoreState = before;
     await compareWith(file.filename, u8, true);
   } catch (e) {
     setBusy(false);
+    setState(before, null);
     showError(e.message || String(e));
   }
 }
@@ -436,7 +439,11 @@ async function modMeta(read, has) {
       kind: file.includes('neoforge') ? 'NeoForge mod' : 'Forge mod',
       id: g('modId'), name: g('displayName'), version: g('version'), authors: g('authors') ? [g('authors')] : [],
       description: g('description'), license: g('license'),
-      depends: [...t.matchAll(/^\s*modId\s*=\s*"([^"]+)"[\s\S]*?versionRange\s*=\s*"([^"]+)"/gm)].slice(1).map(m => `${m[1]} ${m[2]}`)
+      depends: [...t.matchAll(/\[\[dependencies\.[^\]]+\]\]([\s\S]*?)(?=\n\s*\[|$)/g)].map(m => {
+        const b = m[1], g2 = k => (new RegExp('^\\s*' + k + '\\s*=\\s*"([^"]*)"', 'm').exec(b) || [])[1];
+        const type = (g2('type') || (/mandatory\s*=\s*false/.test(b) ? 'optional' : 'required')).toLowerCase();
+        return g2('modId') ? `${g2('modId')} ${g2('versionRange') || ''}${type !== 'required' ? ' (' + type + ')' : ''}`.trim() : null;
+      }).filter(Boolean)
     };
   }
   for (const file of ['plugin.yml', 'paper-plugin.yml', 'bungee.yml']) {

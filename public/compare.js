@@ -33,28 +33,55 @@ async function toJarBytes(name, u8) {
   throw new Error('compare works with jars, .class files, apks / dex, and exes that contain a jar');
 }
 
-// class name -> { hash, entry, src }, resource path -> { hash, entry }, plus a scan
-async function indexSide(classZip, resZip, label) {
-  const classes = new Map(), res = new Map();
-  const scan = Scan.newResult();
-  const files = Object.values(classZip.files).filter(f => !f.dir && /\.class$/i.test(f.name) && !/^META-INF\/versions\//.test(f.name));
-  for (let i = 0; i < files.length; i++) {
-    if (i % 200 === 0) { setState(`indexing ${label} ${i}/${files.length}`, null); await new Promise(r => setTimeout(r, 0)); }
-    const u8 = await files[i].async('uint8array');
-    const info = Inspect.parseClass(u8, true);
-    if (!info || !info.name) continue;
-    classes.set(info.name, { hash: fnv(u8), entry: files[i], src: srcPathOf(files[i].name) });
-    Scan.scanClass(scan, info);
-  }
-  const rz = resZip || classZip;
-  for (const f of Object.values(rz.files)) {
-    if (f.dir || /\.class$/i.test(f.name) || /^classes\d*\.dex$/.test(f.name) || /^META-INF\/[^/]+\.(SF|RSA|DSA|EC|MF)$/i.test(f.name)) continue;
-    res.set(f.name, { hash: fnv(await f.async('uint8array')), entry: f });
-  }
-  return { classes, res, scan, sum: Scan.summarize(scan) };
+// Nested jars are paired across versions by name with version-like parts removed,
+// e.g. META-INF/jars/fabric-api-base-0.4.42+6573ed8c19.jar -> META-INF/jars/fabric-api-base.jar
+function nestKey(path) {
+  const dir = path.slice(0, path.lastIndexOf('/') + 1);
+  const base = path.slice(dir.length).replace(/\.(jar|zip)$/i, '');
+  const kept = base.split(/[-_+]/).filter(t => t && !/\d/.test(t));
+  return dir + (kept.join('-') || base) + '.jar';
 }
 
-// reverse=true: the given file is the OLD version and the open file is the new one
+// class key -> { hash, entry, jarKey, srcInJar }, resource key -> { hash, entry }, nested jars, and a scan.
+// Keys of things inside nested jars are "<nestKey>!<name>".
+async function indexSide(classZip, resZip, label) {
+  const classes = new Map(), res = new Map(), jars = new Map([['', { zip: classZip }]]);
+  const scan = Scan.newResult();
+  const addClasses = async (zip, jarKey) => {
+    const prefix = jarKey ? jarKey + '!' : '';
+    const files = Object.values(zip.files).filter(f => !f.dir && /\.class$/i.test(f.name) && !/^META-INF\/versions\//.test(f.name));
+    for (let i = 0; i < files.length; i++) {
+      if (i % 200 === 0) { setState(`indexing ${label}${jarKey ? ' › ' + baseOf(jarKey) : ''} ${i}/${files.length}`, null); await new Promise(r => setTimeout(r, 0)); }
+      const u8 = await files[i].async('uint8array');
+      const info = Inspect.parseClass(u8, true);
+      if (!info || !info.name) continue;
+      classes.set(prefix + info.name, { hash: fnv(u8), entry: files[i], jarKey, srcInJar: srcPathOf(files[i].name) });
+      Scan.scanClass(scan, info, prefix);
+    }
+  };
+  const addResources = async (zip, jarKey, depth) => {
+    const prefix = jarKey ? jarKey + '!' : '';
+    for (const f of Object.values(zip.files)) {
+      if (f.dir || /\.class$/i.test(f.name) || /^classes\d*\.dex$/.test(f.name) || /^META-INF\/[^/]+\.(SF|RSA|DSA|EC|MF)$/i.test(f.name)) continue;
+      const size = (f._data && f._data.uncompressedSize) || 0;
+      if (depth < 1 && /\.(jar|zip)$/i.test(f.name) && size < 64 * 1024 * 1024) {
+        try {
+          const inner = await JSZip.loadAsync(await f.async('uint8array'));
+          const key = nestKey(f.name);
+          jars.set(key, { zip: inner, entry: f, name: f.name });
+          await addClasses(inner, key);
+          await addResources(inner, key, depth + 1);
+          continue;
+        } catch (e) { /* not a zip: compare as a plain file */ }
+      }
+      res.set(prefix + f.name, { hash: fnv(await f.async('uint8array')), entry: f });
+    }
+  };
+  await addClasses(classZip, '');
+  await addResources(resZip || classZip, '', 0);
+  return { classes, res, jars, scan, sum: Scan.summarize(scan) };
+}
+
 async function compareWith(name, u8, reverse) {
   if (busy || !S.jarInfo) return;
   setBusy(true);
@@ -87,8 +114,7 @@ async function compareWith(name, u8, reverse) {
     newHits.sort((x, y) => SEV_RANK[y.rule.sev] - SEV_RANK[x.rule.sev]);
     const urlsNew = [...B.scan.urls.keys()].filter(u => !A.scan.urls.has(u));
     const urlsGone = [...A.scan.urls.keys()].filter(u => !B.scan.urls.has(u));
-    const bPath = `/str/cmp-${uid()}.jar`;
-    S.cmp = { name, reverse: !!reverse, A, B, other: { zip: bZip, jar: b.jar, path: bPath, loaded: false }, cls, res, newHits, goneHits, urlsNew, urlsGone };
+    S.cmp = { name, reverse: !!reverse, A, B, otherJar: b.jar, cls, res, newHits, goneHits, urlsNew, urlsGone };
     renderCompare();
     el.rtabs.querySelector('[data-view=compare]').hidden = false;
     showView('compare');
@@ -147,40 +173,52 @@ function renderCompare() {
   for (const a of el.cmpview.querySelectorAll('[data-rdiff]')) a.onclick = () => resourceDiff(a.dataset.rdiff);
 }
 
-// ---- source of a class in the other file (decompiled with its jar as library)
+// ---- decompiled source of one source file on one side of the comparison
 
-async function otherSource(srcPath) {
-  const c = S.cmp, o = c.other;
-  const side = c.reverse ? c.A : c.B;
-  const group = [...side.classes.values()].filter(v => v.src === srcPath);
-  if (!group.length) return null;
+function sideOf(which) { const c = S.cmp; return which === 'open' ? (c.reverse ? c.B : c.A) : (c.reverse ? c.A : c.B); }
+
+async function jarPathFor(which, jarKey) {
+  const side = sideOf(which), j = side.jars.get(jarKey);
+  if (j.path) return j.path;
   await ensureJVM();
-  if (!o.loaded) { cheerpOSAddStringFile(o.path, o.jar); o.loaded = true; }
+  const bytes = jarKey ? await j.entry.async('uint8array') : which === 'other' ? S.cmp.otherJar : S.jarBytes;
+  j.path = `/str/cmp-${uid()}.jar`;
+  cheerpOSAddStringFile(j.path, bytes);
+  return j.path;
+}
+
+async function sideSource(which, jarKey, srcInJar) {
+  if (which === 'open' && !jarKey) {
+    const f = S.files.get(srcInJar);
+    if (!f || f.type !== 'src') return null;
+    await ensureSource(f);
+    return f.text;
+  }
+  const side = sideOf(which);
+  const group = [...side.classes.values()].filter(v => v.jarKey === jarKey && v.srcInJar === srcInJar);
+  if (!group.length) return null;
+  const lib = await jarPathFor(which, jarKey);
   const z = new JSZip();
   for (const g of group) z.file(g.entry.name, await g.entry.async('uint8array'));
   const inPath = `/str/cmpone-${uid()}.jar`;
   cheerpOSAddStringFile(inPath, await z.generateAsync({ type: 'uint8array', compression: 'STORE' }));
-  const out = await runDecompiler(S.engine, inPath, ['ezlarp.lib=' + o.path]);
-  const key = Object.keys(out.sources).find(k => k === srcPath || srcPath.endsWith('/' + k)) || Object.keys(out.sources)[0];
+  const out = await runDecompiler(S.engine, inPath, ['ezlarp.lib=' + lib]);
+  const key = Object.keys(out.sources).find(k => k === srcInJar || srcInJar.endsWith('/' + k)) || Object.keys(out.sources)[0];
   return out.sources[key];
 }
 
-async function openSource(srcPath) {
-  const f = S.files.get(srcPath);
-  if (!f || f.type !== 'src') return null;
-  await ensureSource(f);
-  return f.text;
-}
-
-async function classDiff(internal) {
+async function classDiff(key) {
   const c = S.cmp;
-  const srcPath = (c.B.classes.get(internal) || c.A.classes.get(internal) || {}).src || srcPathOf(internal);
-  const vpath = '⇄ ' + srcPath;
+  const ent = c.B.classes.get(key) || c.A.classes.get(key);
+  if (!ent) return;
+  const label = (ent.jarKey ? baseOf(ent.jarKey) + ' › ' : '') + ent.srcInJar;
+  const vpath = '⇄ ' + label;
   showView('source');
-  showPlaceholder(`// decompiling both versions of ${baseOf(srcPath)}…`);
+  showPlaceholder(`// decompiling both versions of ${baseOf(ent.srcInJar)}…`);
   try {
-    const mine = await openSource(srcPath), other = await otherSource(srcPath);
-    if (c.reverse) showDiff(vpath, other, mine, srcPath); else showDiff(vpath, mine, other, srcPath);
+    const mine = await sideSource('open', ent.jarKey, ent.srcInJar);
+    const other = await sideSource('other', ent.jarKey, ent.srcInJar);
+    if (c.reverse) showDiff(vpath, other, mine, label); else showDiff(vpath, mine, other, label);
   } catch (e) {
     renderCode('// could not build the diff: ' + (e.message || e), '');
   }
