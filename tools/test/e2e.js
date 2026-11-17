@@ -33,13 +33,14 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
     return err;
   };
   const reset = () => page.evaluate(() => { document.getElementById('fstate').textContent = '…'; document.getElementById('err').hidden = true; });
-  const sample = async n => { await reset(); await page.click(`[data-sample="${n}"]`); };
+  const sample = async n => { await reset(); await page.evaluate(n => loadSample(n), n); };
   const drop = async file => { await reset(); await page.setInputFiles('#file', Array.isArray(file) ? file.map(f => path.join(FX, f)) : path.join(FX, file)); };
   const code = () => page.textContent('#code');
   const waitCode = (re, ms = 60000) => page.waitForFunction(r => new RegExp(r).test(document.getElementById('code').textContent), re.source, { timeout: ms }).then(() => true, () => false);
   const shot = n => page.screenshot({ path: `${SHOTS}/${n}.png` });
 
-  await page.goto(BASE + '/');
+  // classic mode: small files decompile fully up front (#lazy=150), so the source-view tests below apply
+  await page.goto(BASE + '/#lazy=150');
   ok(await page.title() === 'EZLARP — jar / apk / exe decompiler & scanner', 'title');
 
   // ---------------- sample mod jar
@@ -48,14 +49,17 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   ok(!(await waitState(/^done/)), 'decompiled', await state());
   ok(/ExampleMod\.java/.test(await page.textContent('#tree')), 'tree lists ExampleMod.java');
   ok(await waitCode(/class ExampleMod/), 'first file is the entrypoint');
-  ok(await page.$eval('#verdict', e => !e.hidden && e.classList.contains('high')), 'verdict high');
+  ok(await page.$eval('#verdict', e => !e.hidden && e.classList.contains('malicious')), 'verdict malicious');
+  ok(/Minecraft session stealer/.test(await page.textContent('#verdict')), 'detection name in verdict', await page.textContent('#verdict'));
   ok(/high-risk/.test(await page.textContent('#ftags')), 'risk tag');
   ok(/Fabric mod/.test(await page.textContent('#ftags')), 'fabric tag');
   ok(/[0-9a-f]{64}/.test(await page.textContent('#fhash')) && /[0-9a-f]{32}/.test(await page.textContent('#fmd5')), 'hashes');
   ok(/virustotal\.com\/gui\/file\/[0-9a-f]{64}/.test(await page.getAttribute('#vt', 'href')), 'virustotal link');
   ok(await page.$$eval('#ftabs .ftab', t => t.length) === 1, 'one tab open');
   ok(/^5 classes$/.test(await page.$$eval('#ftags .tagx', t => t.map(x => x.textContent).find(x => /class/.test(x)))), 'plural classes');
-  ok(/^2\s*high-risk indicators$/.test(await page.textContent('#verdict')), 'verdict count', await page.textContent('#verdict'));
+  ok(/^MALICIOUS/.test(await page.textContent('#verdict')), 'verdict word', await page.textContent('#verdict'));
+  ok(await page.$eval('.rtab.active', e => e.dataset.view) === 'scan', 'report tab shown first');
+  await page.click('.rtab[data-view=source]');
   await page.waitForTimeout(500);
   ok(await page.$eval('#fill', e => e.style.width) === '100%', 'progress full when done');
   ok(!(await page.$eval('#outline', e => e.hidden)) && /onInitialize/.test(await page.textContent('#outline')), 'outline has methods');
@@ -205,7 +209,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   console.log('nested');
   await drop('nested.jar');
   ok(!(await waitState(/^done/)), 'nested outer', await state());
-  ok(await page.$eval('#verdict', e => e.classList.contains('high')), 'nested: inner jar findings reach the verdict');
+  ok(await page.$eval('#verdict', e => /malicious|suspicious/.test(e.className)), 'nested: inner jar findings reach the verdict');
   await page.click('.rtab[data-view=scan]');
   const nscan = await page.textContent('#scan');
   ok(/INSIDE THIS ARCHIVE/.test(nscan) && /inner-mod\.jar/.test(nscan) && /lib-native\.dll/.test(nscan) && /NATIVE/.test(nscan), 'nested table', nscan.slice(0, 300));
@@ -235,7 +239,8 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   ok(/demo_main\.py/.test(await page.textContent('#tree')) && /helper\.py/.test(await page.textContent('#tree')), 'python tree');
   ok(await waitCode(/def candidate_paths/), 'entry script opened first');
   ok(/discord\.com\/api\/webhooks/.test(await code()), 'python strings listed');
-  ok(await page.$eval('#verdict', e => e.classList.contains('high')), 'python webhook flagged');
+  ok(await page.$eval('#verdict', e => /malicious|suspicious/.test(e.className)), 'python webhook flagged');
+  await page.click('.rtab[data-view=source]');
   const [dpyc] = await Promise.all([page.waitForEvent('download'), page.click('#dlone')]);
   const pycPath = path.join(SHOTS, dpyc.suggestedFilename()); await dpyc.saveAs(pycPath);
   const pyc = fs.readFileSync(pycPath);
@@ -267,6 +272,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   // ---------------- open from a link (same-origin path)
   console.log('url');
   await reset();
+  await page.click('.mode[data-mode=url]');
   await page.fill('#url', '/samples/sample.apk');
   await page.press('#url', 'Enter');
   ok(!(await waitState(/^done/)), 'url load', await state());
@@ -274,7 +280,14 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await reset();
   await page.fill('#url', 'http://127.0.0.1:1/nothing.jar');
   await page.press('#url', 'Enter');
-  ok(/CORS|download/.test(await waitState(/error/)), 'url failure explained');
+  ok(/unsupported|download/.test(await waitState(/error/)), 'url failure explained');
+  // blocked hosts go through /api/fetch (test server serves public/samples/ for Discord links)
+  await reset();
+  await page.fill('#url', 'https://cdn.discordapp.com/attachments/1/2/sample.jar?ex=abc');
+  await page.press('#url', 'Enter');
+  ok(!(await waitState(/^done/)), 'discord link via server', await state());
+  ok(/sample\.jar/.test(await page.textContent('#fname')) && /from Discord/.test(await page.textContent('#ftags')), 'discord name + source tag', await page.textContent('#ftags'));
+  await page.click('.mode[data-mode=file]');
 
   // ---------------- modrinth modpack
   console.log('mrpack');
@@ -285,7 +298,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await page.click('#mrscan');
   ok(!(await waitState(/^batch done/)), 'mrpack batch', await state());
   const mrows = await page.$$eval('#scan table.batch tr.brow', r => r.map(x => x.textContent));
-  ok(mrows.length === 2 && /^HIGH.*sample\.jar/.test(mrows[0]) && /SKIPPED.*hash does not match/.test(mrows[1]), 'mrpack rows (hash check)', mrows);
+  ok(mrows.length === 2 && /^(MALICIOUS|SUSPICIOUS).*sample\.jar/.test(mrows[0]) && /SKIPPED.*hash does not match/.test(mrows[1]), 'mrpack rows (hash check)', mrows);
 
   // ---------------- compare
   console.log('compare');
@@ -340,10 +353,10 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   ok(!(await waitState(/^batch done/)), 'batch done', await state());
   const rows = await page.$$eval('#scan table.batch tr.brow', r => r.map(x => x.textContent));
   ok(rows.length === 5, 'batch rows', rows.length);
-  ok(/^HIGH/.test(rows[0]) && /SKIPPED/.test(rows[rows.length - 1]), 'batch sorted by risk', rows.map(r => r.slice(0, 40)));
+  ok(/^(MALICIOUS|SUSPICIOUS)/.test(rows[0]) && /SKIPPED/.test(rows[rows.length - 1]), 'batch sorted by risk', rows.map(r => r.slice(0, 40)));
   ok(rows.some(r => /^CLEAN.*clean-lib\.jar/.test(r)), 'clean jar clean');
   ok(rows.some(r => /EZLARP Sample Mod/.test(r)), 'batch shows mod name');
-  ok(/high-risk|of 5 files/.test(await page.textContent('#verdict')), 'batch verdict', await page.textContent('#verdict'));
+  ok(/MALICIOUS|SUSPICIOUS|of 5 files/.test(await page.textContent('#verdict')), 'batch verdict', await page.textContent('#verdict'));
   await shot('09-batch');
   await reset();
   await page.click('#scan table.batch tr.brow');
@@ -361,10 +374,11 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   // ---------------- big jar: on-demand mode
   console.log('big jar (lazy)');
   await drop('big.jar');
-  ok(!(await waitState(/^ready/, 180000)), 'lazy ready', await state());
+  ok(!(await waitState(/^scan done/, 180000)), 'lazy ready', await state());
   ok(!(await page.$eval('#decall', e => e.hidden)), 'decompile-all button', await page.evaluate(() => JSON.stringify({ st: el.fstate.textContent, lazy: S.lazy, name: S.name, pend: pendingCount(), err: el.err.hidden ? '' : el.err.textContent })));
-  ok(/decompile when you open them/.test(await page.textContent('#banner')), 'lazy banner');
+  ok(/decompiled when you open them/.test(await page.textContent('#banner')), 'lazy banner');
   ok(await waitCode(/class Main|public class/, 120000), 'entry class decompiled on demand');
+  await page.click('.rtab[data-view=source]');
   await page.click('#qmode [data-m=files]');
   await page.fill('#q', 'CfrDriver.java');
   await page.waitForTimeout(200);
@@ -380,6 +394,22 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await sample('sample.jar');
   await waitState(/^done/);
   await shot('08-mobile');
+
+  // ---------------- default mode: report first, Java engine only when CODE is opened
+  console.log('report-first (default)');
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(BASE + '/?fresh#noprewarm');
+  ok(await page.isVisible('.hero') && await page.isVisible('.mode[data-mode=url]'), 'landing hero + url tab');
+  await sample('sample.jar');
+  ok(!(await waitState(/^scan done/)), 'scan done without decompiling', await state());
+  ok(await page.$eval('#verdict', e => e.classList.contains('malicious')), 'verdict shown right away');
+  ok(await page.$eval('.rtab.active', e => e.dataset.view) === 'scan' && /DETECTIONS/.test(await page.textContent('#scan')), 'report with detections first');
+  ok(await page.evaluate(() => !document.querySelector('script[src*="cjrtnc"]') && !S.current), 'Java engine not loaded yet');
+  ok(!(await page.isVisible('.hero')), 'hero hidden once a file is open');
+  await page.click('.rtab[data-view=source]');
+  ok(await waitCode(/class ExampleMod/), 'CODE tab decompiles the entry class');
+  ok(await page.evaluate(() => !!document.querySelector('script[src*="cjrtnc"]')), 'Java engine loaded on demand');
+  await shot('12-report-first');
 
   ok(errors.length === 0, 'no page errors', errors.slice(0, 5));
   console.log(`\n${pass} passed, ${fail} failed`);

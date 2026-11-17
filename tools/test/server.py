@@ -23,6 +23,28 @@ class H(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def do_GET(self):
+        # stand-in for functions/api/fetch.js: Discord links serve files from public/samples/
+        if self.path.startswith('/api/fetch'):
+            from urllib.parse import urlparse, parse_qs, quote
+            url = parse_qs(urlparse(self.path).query).get('url', [''])[0]
+            name = url.split('?')[0].rstrip('/').split('/')[-1]
+            fp = os.path.join(ROOT, 'samples', name)
+            if url.startswith('https://cdn.discordapp.com/') and os.path.isfile(fp):
+                body = open(fp, 'rb').read()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/octet-stream')
+                self.send_header('x-filename', quote(name))
+            else:
+                body = json.dumps({'error': 'test server: unsupported link'}).encode()
+                self.send_response(403)
+                self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        return super().do_GET()
+
     def do_POST(self):
         if self.path != '/__jvm':
             self.send_error(404); return

@@ -101,6 +101,13 @@ const Scan = (() => {
     { id: 'jar-native', sev: 'low', title: 'Bundled native binaries',
       why: 'The archive ships .dll / .so / .dylib / .exe files. Their code is outside what a Java decompiler can show; their strings were scanned.',
       native: true },
+    { id: 'sig-fractureiser', sev: 'high', title: 'fractureiser malware marker',
+      why: 'Matches published indicators of the fractureiser malware (2023): its command servers, payload file names or the "neko" injector classes.',
+      str: /^(?:85\.217\.144\.130|107\.189\.3\.101)(?::\d+)?$|libWebGL64\.jar|systemd-utility\.service|dev[/.]neko[/.]neko(?:injector|client)/,
+      cls: ['dev/neko/nekoinjector/', 'dev/neko/nekoclient/'] },
+    { id: 'sig-skyrage', sev: 'high', title: 'Skyrage malware marker',
+      why: 'Contacts skyrage.de, the server of the Skyrage Minecraft malware (2023).',
+      str: /(?:^|[/.@])skyrage\.de\b/i },
     { id: 'obf-tool', sev: 'low', title: 'Obfuscator marker',
       why: 'Left behind by a commercial or public obfuscator.',
       str: /Allatori|ZKM \d|Stringer Java Obfuscator|skidfuscator|paramorphism|branchlock|qprotect|Obfuscated (?:by|with)|radon\b.*obfuscat/i },
@@ -231,7 +238,7 @@ const Scan = (() => {
   function textSummary(name, sha256, sum, res) {
     const defang = u => u.replace(/^http/i, 'hxxp').replace(/\./g, '[.]');
     const icon = { high: '🔴', med: '🟠', low: '🟡', none: '🟢' }[sum.level];
-    const lines = [`**${name}** — ${icon} ${sum.label} (EZLARP static scan)`];
+    const lines = [`**${name}** — ${icon} ${VERDICT_TEXT[sum.verdict] || sum.label}${sum.detections && sum.detections.length ? ': ' + sum.detections.map(d => d.name).join(', ') : ''} (EZLARP static scan)`];
     if (sha256) lines.push('sha256: `' + sha256 + '`');
     for (const f of sum.findings.slice(0, 8)) {
       const w = [...f.where.keys()].slice(0, 2).map(x => x.replace(/\//g, '.')).join(', ');
@@ -267,6 +274,38 @@ const Scan = (() => {
     return m;
   }
 
+  // Named detections, shown as the verdict. Signatures match known malware; the
+  // behaviour ones need "steals X" and "sends it out" together.
+  const EXFIL = ['webhook', 'telegram'];
+  const FAMILIES = [
+    { name: 'fractureiser', kind: 'known malware', needs: [['sig-fractureiser']] },
+    { name: 'Skyrage', kind: 'known malware', needs: [['sig-skyrage']] },
+    { name: 'Minecraft session stealer', kind: 'behaviour', sameClass: true, needs: [['mc-session'], EXFIL] },
+    { name: 'Discord token grabber', kind: 'behaviour', needs: [['discord-tokens'], EXFIL] },
+    { name: 'Browser password stealer', kind: 'behaviour', needs: [['browser-creds'], EXFIL] },
+    { name: 'Crypto wallet stealer', kind: 'behaviour', needs: [['wallets'], EXFIL] },
+    { name: 'Launcher account stealer', kind: 'behaviour', needs: [['launcher-accounts'], EXFIL] },
+    { name: 'Dropper (downloads and installs a program)', kind: 'behaviour', needs: [['payload-url'], ['persistence']] },
+  ];
+  function detectFamilies(res) {
+    const out = [];
+    for (const fam of FAMILIES) {
+      const groups = fam.needs.map(ids => ids.map(id => res.hits.get(id)).filter(Boolean));
+      if (groups.some(g => !g.length)) continue;
+      let where = null;
+      if (fam.sameClass) {
+        const sets = groups.map(g => new Set(g.flatMap(h => [...h.where.keys()])));
+        const common = [...sets[0]].filter(w => sets.every(st => st.has(w)));
+        if (!common.length) continue;
+        where = common;
+      } else {
+        where = [...new Set(groups.flat().flatMap(h => [...h.where.keys()]))];
+      }
+      out.push({ name: fam.name, kind: fam.kind, where: where.slice(0, 20), because: groups.map(g => g.map(h => h.rule.title).join(' / ')) });
+    }
+    return out;
+  }
+
   function summarize(res) {
     const sess = res.hits.get('mc-session');
     if (sess) {
@@ -293,8 +332,12 @@ const Scan = (() => {
     const label = {
       high: 'high-risk indicators', med: 'review recommended', low: 'minor indicators', none: 'no known indicators'
     }[level];
-    return { findings, count, level, label, rulesTotal: RULES.length, rulesHit: findings.length };
+    const detections = detectFamilies(res);
+    // one-word verdict, like an online scanner
+    const verdict = detections.length ? 'malicious' : level === 'high' ? 'suspicious' : level === 'med' ? 'review' : 'clean';
+    return { findings, count, level, label, detections, verdict, rulesTotal: RULES.length, rulesHit: findings.length };
   }
 
-  return { RULES, newResult, scanClass, scanString, scanNative, scanNames, summarize, textSummary, decodings };
+  const VERDICT_TEXT = { malicious: 'MALICIOUS', suspicious: 'SUSPICIOUS', review: 'needs review', clean: 'clean' };
+  return { RULES, VERDICT_TEXT, newResult, scanClass, scanString, scanNative, scanNames, summarize, textSummary, decodings };
 })();

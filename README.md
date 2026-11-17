@@ -1,14 +1,18 @@
 # EZLARP
 
-jar / class / exe decompiler &middot; Vineflower + CFR &middot; slim black UI
-**100% in-browser &middot; no backend &middot; nothing leaves your machine**
+malware scanner + decompiler for jar / apk / exe &middot; Vineflower + CFR &middot; slim black UI
+**files are scanned in your browser and never uploaded** &middot; one small server function downloads links
 
 Live: https://ezlarp.pages.dev
 
 ## What it does
 
-- **.jar / .zip / .war**: decompiles every class to Java. Big jars (over 150 classes) open instantly and decompile each class when you click it, with a "decompile all" button.
-- **.apk / .dex / .aar / .xapk**: dex2jar converts Dalvik bytecode in the browser, then the normal decompiler runs. Decoded `AndroidManifest.xml`, permissions (sensitive ones flagged), SDK levels and components.
+- **Report first (like jarscanner.org)**: drop a file or paste a link and you get a verdict in seconds: **MALICIOUS** (named detection), **SUSPICIOUS** (high-risk indicators), **NEEDS REVIEW** or **CLEAN**. The scan is plain JavaScript; the Java engine (CheerpJ) is only downloaded when you open the CODE tab, so the report works on phones and when the CDN is blocked.
+- **Named detections**: signatures for known Minecraft malware (fractureiser, Skyrage) and behaviour detections that need "steals X" and "sends it out" together: Minecraft session stealer (same class), Discord token grabber, browser password stealer, crypto wallet stealer, launcher account stealer, dropper.
+- **Scan with URL**: Discord attachments, MediaFire pages, Gofile, GitHub release files, CurseForge CDN, Modrinth, Dropbox and Google Drive. Hosts that block in-browser downloads go through `functions/api/fetch.js` (a Cloudflare Pages Function with a host allowlist and a 150 MB cap; files stream through and are not stored).
+
+- **.jar / .zip / .war**: every class decompiles to Java when you open it, or all at once with "decompile all". `#lazy=N` in the address decompiles files with up to N classes up front.
+- **.apk / .dex / .aar / .xapk**: dex files are parsed in JS (tree, scan, search, usages in seconds even for 100 MB APKs); each class goes through dex2jar only when opened, and "decompile all" works in chunks. Decoded `AndroidManifest.xml`, permissions (sensitive ones flagged), SDK levels and components.
 - **.class**: one or many; they're packed into a jar at their package paths.
 - **.exe / .dll**: Java apps wrapped as exe (Launch4j, exe4j, JSmooth...) get their jar extracted and decompiled. Everything else gets a VirusTotal-style report: version info, icon, UAC level, compile time, sections + entropy, imports/exports, .NET and packer detection, PyInstaller contents (with extraction), and a searchable strings list.
 - **Threat scan**: 27 static indicator rules over every class's constant pool (Discord/Telegram exfil, Minecraft session-token access, browser/Discord/wallet/launcher credential paths, persistence, shell commands, runtime class loading, payload URLs, IP lookups...), plus URL/IP extraction and an obfuscation heuristic. Findings link to the exact class. Session-token reads that only talk to Mojang/Microsoft servers are reported separately from token theft. Heuristics, not an antivirus.

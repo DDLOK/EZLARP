@@ -7,7 +7,10 @@ const HELPER = '/app/ezlarp-helper-v3.jar';
 const CP_DECOMPILE = `${HELPER}:/app/vineflower-1.12.0.jar:/app/cfr-0.152.jar`;
 const CP_D2J = `${HELPER}:/app/d2j-bundle-2.4.jar`;
 // source files; above this, decompile on demand (#lazy=N in the URL overrides, handy for testing)
-const LAZY_OVER = +((/[#&]lazy=(\d+)/.exec(location.hash) || [])[1] || 150);
+// Up to this many source files are decompiled right away. Default 0: the report comes
+// first and code is decompiled when opened (the Java engine is heavy on phones).
+const LAZY_OVER = +((/[#&]lazy=(\d+)/.exec(location.hash) || [])[1] || 0);
+const CHEERPJ_URL = 'https://cjrtnc.leaningtech.com/5.0/loader.js';
 const MD5_MAX = 256 * 1024 * 1024;
 
 // ------------------------------------------------------------------ prefs
@@ -24,6 +27,13 @@ el.rename.onchange = () => savePref('rename', el.rename.checked ? '1' : '0');
 // ------------------------------------------------------------------ input
 
 el.pick.onclick = () => el.file.click();
+// Upload file / Scan with URL tabs
+function setMode(m) {
+  for (const b of document.querySelectorAll('.mode')) { const on = b.dataset.mode === m; b.classList.toggle('active', on); b.setAttribute('aria-selected', on); }
+  for (const p of document.querySelectorAll('[data-panel]')) p.hidden = p.dataset.panel !== m;
+  if (m === 'url') setTimeout(() => el.url.focus(), 0);
+}
+for (const b of document.querySelectorAll('.mode')) b.onclick = () => setMode(b.dataset.mode);
 el.file.onchange = e => { handleFiles([...e.target.files]); el.file.value = ''; };
 
 for (const b of document.querySelectorAll('[data-sample]')) b.onclick = () => loadSample(b.dataset.sample);
@@ -43,7 +53,7 @@ const hashSample = (/[#&]sample=([\w.-]+)/.exec(location.hash) || [])[1];
 const hashUrl = (/[#&]url=([^&]+)/.exec(location.hash) || [])[1];
 window.addEventListener('load', () => {
   if (hashSample) loadSample(hashSample);
-  else if (hashUrl) { el.url.value = decodeURIComponent(hashUrl); loadUrl(el.url.value); }
+  else if (hashUrl) { setMode('url'); el.url.value = decodeURIComponent(hashUrl); loadUrl(el.url.value); }
 });
 
 // ------------------------------------------------------------------ open from a link
@@ -72,18 +82,45 @@ async function resolveLink(raw) {
   // GitHub file pages -> raw (raw.githubusercontent.com allows cross-site downloads)
   const gh = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/(?:blob|raw)\/(.+)$/i.exec(url);
   if (gh) url = `https://raw.githubusercontent.com/${gh[1]}/${gh[2]}`;
-  const name = decodeURIComponent((new URL(url).pathname.split('/').pop() || 'download').replace(/\?.*$/, '')) || 'download';
-  return { url, name, source: new URL(url).hostname };
+  const host = new URL(url).hostname.toLowerCase();
+  let name = 'download';
+  try { name = decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean).pop() || 'download'); } catch (e) { /* keep default */ }
+  // hosts that block in-browser downloads go through our server-side fetcher
+  const proxy = PROXY_HOSTS.test(host) && !/^raw\.githubusercontent\.com$/.test(host);
+  return { url, name, source: SOURCE_NAMES.find(([re]) => re.test(host))?.[1] || host, proxy };
+}
+const PROXY_HOSTS = /(^|\.)(discordapp\.com|discordapp\.net|mediafire\.com|gofile\.io|github\.com|githubusercontent\.com|forgecdn\.net|dropbox\.com|dropboxusercontent\.com|drive\.google\.com|googleusercontent\.com)$/;
+const SOURCE_NAMES = [[/discordapp\./, 'Discord'], [/mediafire\.com$/, 'MediaFire'], [/gofile\.io$/, 'Gofile'], [/github/, 'GitHub'],
+  [/forgecdn\.net$/, 'CurseForge'], [/modrinth\.com$/, 'Modrinth'], [/dropbox/, 'Dropbox'], [/google/, 'Google Drive']];
+
+// Downloads through /api/fetch (a Cloudflare function next to this page).
+async function viaServer(url) {
+  let r;
+  try { r = await fetch('/api/fetch?url=' + encodeURIComponent(url)); } catch (e) { throw new Error('could not reach the EZLARP link downloader. Download the file and drop it here instead.'); }
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try { const j = await r.json(); if (j.error) msg = j.error; } catch (e) {
+      if (r.status === 404 || r.status === 405) msg = 'the link downloader is not available on this copy of the site';
+    }
+    throw new Error(msg);
+  }
+  return r;
 }
 
-async function fetchBytes(url, label, onProgress) {
+async function fetchBytes(url, label, onProgress, opts = {}) {
   let r;
-  try {
-    r = await fetch(url);
-  } catch (e) {
-    throw new Error(`Couldn't download that link from the browser. The site doesn't allow downloads from other websites (CORS). GitHub release files, CurseForge and Google Drive work like this.\nDownload the file yourself and drop it here instead. Modrinth links, raw GitHub files and jsDelivr links do work.`);
+  if (opts.proxy) r = await viaServer(url);
+  else {
+    try {
+      r = await fetch(url);
+    } catch (e) {
+      // blocked by CORS: let the server download it instead
+      r = await viaServer(url);
+    }
   }
   if (!r.ok) throw new Error(`download failed: HTTP ${r.status}`);
+  const served = r.headers.get('x-filename');
+  if (served && opts.onName) { try { opts.onName(decodeURIComponent(served)); } catch (e) { /* ignore */ } }
   const total = +r.headers.get('content-length') || 0;
   if (!r.body || !r.body.getReader) return new Uint8Array(await r.arrayBuffer());
   const reader = r.body.getReader();
@@ -153,7 +190,8 @@ async function loadUrl(raw) {
     const link = await resolveLink(raw);
     el.fname.textContent = link.name;
     const u8 = await fetchBytes(link.url, link.name, (got, total) =>
-      setState(`downloading ${human(got)}${total ? ' / ' + human(total) : ''}`, total ? 2 + 4 * got / total : null));
+      setState(`downloading ${human(got)}${total ? ' / ' + human(total) : ''}`, total ? 2 + 4 * got / total : null),
+    { proxy: link.proxy, onName: n => { if (n && !/^(download|view|file)$/i.test(n)) { link.name = n; el.fname.textContent = n; } } });
     if (link.sha1 && await sha1hex(u8) !== link.sha1) throw new Error('downloaded file does not match the hash Modrinth published for it');
     setBusy(false);
     stack.length = 0;
@@ -221,6 +259,7 @@ async function analyze(name, u8, opts = {}) {
   el.q.value = '';
   setQMode('files', false);
   el.drop.classList.add('compact');
+  document.body.classList.add('has-result');
   el.recent.hidden = true;
   clearViewer();
   el.fname.textContent = name;
@@ -300,8 +339,8 @@ async function analyze(name, u8, opts = {}) {
       const groups = [...S.files.values()].filter(f => f.type === 'src').length;
       if (groups > LAZY_OVER) {
         S.lazy = true;
-        S.log.push(`${groups} source files: decompiling on demand. Use "decompile all" to do everything at once.`);
-        finish(`ready · ${groups} classes · decompiles as you open them`, t0);
+        S.log.push(`${plural(groups, 'source file')}: each one is decompiled when you open it. "decompile all" does everything at once.`);
+        finish(`scan done · ${plural(groups, 'source file')} · open CODE to read them`, t0);
       } else {
         await decompileAll(S.engine, el.fallback.checked);
         finish(`done · ${ENGINES[S.engineUsed]} · ${((performance.now() - t0) / 1000).toFixed(1)}s`, t0);
@@ -324,7 +363,7 @@ function finish(msg, t0) {
   renderResult();
   if (!stack.length) {
     const lvl = S.batch ? (['high', 'med', 'low', 'none'].find(l => S.batch.some(r => r.level === l)) || 'none') : S.scan ? S.scan.level : 'none';
-    const label = S.batch ? `batch · ${S.batch.length} files` : S.scan ? S.scan.label : '';
+    const label = S.batch ? `batch · ${S.batch.length} files` : S.scan ? Scan.VERDICT_TEXT[S.scan.verdict] + (S.scan.detections.length ? ': ' + S.scan.detections.map(d => d.name).join(', ') : '') : '';
     pushHistory({ name: S.name, sha256: S.hashes.sha256 || '', level: lvl, label, type: el.ftype.textContent.split(' · ')[0], t: Date.now() });
   }
   if (S.lazy || S.engineUsed) {
@@ -989,11 +1028,23 @@ let cjReady = null;
 let javaQueue = Promise.resolve();
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
+// The Java runtime (CheerpJ) is only downloaded the first time code is decompiled,
+// so the scan works even where it is slow or blocked.
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Could not download the Java engine (CheerpJ). The scan above still works; check your connection or ad blocker to read the code.'));
+    document.head.appendChild(s);
+  });
+}
 function ensureJVM() {
   if (!cjReady) {
-    if (typeof cheerpjInit !== 'function') return Promise.reject(new Error('CheerpJ failed to load (blocked by an extension, or offline?)'));
-    setState('starting JVM (first visit downloads the runtime, cached after)', null);
-    cjReady = cheerpjInit({ version: 17, status: 'none' }).catch(e => { cjReady = null; throw e; });
+    setState('starting the Java engine (first time downloads it, cached after)', null);
+    cjReady = (typeof cheerpjInit === 'function' ? Promise.resolve() : loadScript(CHEERPJ_URL))
+      .then(() => cheerpjInit({ version: 17, status: 'none' }))
+      .catch(e => { cjReady = null; throw e; });
   }
   return cjReady;
 }
@@ -1336,6 +1387,7 @@ async function quickScan(name, u8) {
   } else throw new Error('unsupported type');
   row.summary = Scan.summarize(res);
   row.level = row.summary.level;
+  row.verdict = row.summary.verdict;
   return row;
 }
 

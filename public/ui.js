@@ -149,19 +149,25 @@ function renderResult() {
   renderScan();
   renderLog();
   if (S.strings) renderStrings();
+  // The report always comes first (like an online scanner). Code opens when asked for.
+  S.pendingOpen = null;
   if (hasFiles) {
     renderTree();
-    if (!S.current || !S.files.has(S.current)) {
+    if (S.current && S.files.has(S.current)) openFile(S.current);
+    else {
       S.tabs = [];
-      openFile(pickFirstFile());
-    } else {
-      openFile(S.current);
+      S.pendingOpen = pickFirstFile();
+      // desktops: decompile the first class in the background so CODE is ready
+      if (PREWARM && S.files.get(S.pendingOpen) && S.files.get(S.pendingOpen).type !== 'res') openPending();
     }
-    const onlyNested = S.jarInfo && !S.jarInfo.classCount && S.nestedRows && S.nestedRows.length;
-    showView(S.mrpack ? 'details' : onlyNested ? 'scan' : 'source');
-  } else {
-    showView(S.mrpack ? 'details' : S.batch || (S.scan && S.scan.level !== 'none') ? 'scan' : 'details');
   }
+  showView(S.mrpack ? 'details' : (S.scan || S.batch) ? 'scan' : hasFiles ? 'source' : 'details');
+}
+const PREWARM = !/[#&]noprewarm\b/.test(location.hash) && matchMedia('(pointer:fine) and (min-width:900px)').matches && !(navigator.deviceMemory && navigator.deviceMemory < 4);
+function openPending() {
+  const p = S.pendingOpen;
+  S.pendingOpen = null;
+  if (p && S.files.has(p)) openFile(p);
 }
 
 function pickFirstFile() {
@@ -187,6 +193,7 @@ function pendingCount() {
 function showView(v) {
   for (const b of el.rtabs.querySelectorAll('.rtab')) b.classList.toggle('active', b.dataset.view === v);
   for (const p of el.result.querySelectorAll('.view')) p.hidden = p.dataset.view !== v;
+  if (v === 'source' && S.pendingOpen) openPending();
 }
 el.rtabs.addEventListener('click', e => {
   const b = e.target.closest('.rtab');
@@ -198,9 +205,11 @@ function renderVerdict() {
   if (S.batch) {
     const worst = ['high', 'med', 'low', 'none'].find(l => S.batch.some(r => r.level === l)) || 'none';
     const n = S.batch.filter(r => r.level === worst).length;
+    const mal = S.batch.filter(r => r.verdict === 'malicious').length;
+    const word = mal ? 'malicious' : { high: 'suspicious', med: 'review', low: 'clean', none: 'clean' }[worst];
     v.hidden = false;
-    v.className = 'verdict ' + worst;
-    v.innerHTML = `<div class="n">${worst === 'none' ? '✓' : n}</div><div class="l">${worst === 'none' ? 'no indicators in ' + plural(S.batch.length, 'file') : `of ${S.batch.length} files ${worst === 'high' ? 'high risk' : worst === 'med' ? 'to review' : 'minor'}`}</div>`;
+    v.className = 'verdict ' + word;
+    v.innerHTML = `<div class="word">${Scan.VERDICT_TEXT[word].toUpperCase()}</div><div class="l">${mal ? `${mal} of ${plural(S.batch.length, 'file')} malicious` : worst === 'none' || worst === 'low' ? 'no threats found in ' + plural(S.batch.length, 'file') : `${n} of ${plural(S.batch.length, 'file')} ${worst === 'high' ? 'high risk' : 'to review'}`}</div>`;
     v.onclick = () => showView('scan');
     el.scandot.hidden = false;
     el.scandot.className = 'dot ' + worst;
@@ -209,10 +218,13 @@ function renderVerdict() {
   if (!S.scan) { v.hidden = true; el.scandot.hidden = true; return; }
   const sc = S.scan;
   const n = sc.level === 'high' ? sc.count.high : sc.level === 'med' ? sc.count.med : sc.count.low;
-  const label = { high: plural(n, 'high-risk indicator').replace(/^\d+ /, ''), med: n === 1 ? 'indicator to review' : 'indicators to review', low: n === 1 ? 'minor indicator' : 'minor indicators', none: 'no known indicators' }[sc.level];
+  const sub = sc.verdict === 'malicious' ? sc.detections.map(d => d.name).join(', ')
+    : sc.verdict === 'suspicious' ? plural(n, 'high-risk indicator')
+      : sc.verdict === 'review' ? (n === 1 ? '1 indicator to review' : `${n} indicators to review`)
+        : sc.count.low ? `no threats found · ${plural(sc.count.low, 'minor note')}` : 'no threats found';
   v.hidden = false;
-  v.className = 'verdict ' + sc.level;
-  v.innerHTML = `<div class="n">${sc.level === 'none' ? '✓' : n}</div><div class="l">${esc(label)}</div>`;
+  v.className = 'verdict ' + sc.verdict;
+  v.innerHTML = `<div class="word">${esc(Scan.VERDICT_TEXT[sc.verdict].toUpperCase())}</div><div class="l">${esc(sub)}</div>`;
   v.title = `${sc.rulesHit} of ${sc.rulesTotal} indicator rules matched. Click for details.`;
   v.onclick = () => showView('scan');
   el.scandot.hidden = false;
@@ -228,7 +240,7 @@ function renderBanner() {
   }
   const pend = pendingCount();
   if (S.lazy && pend) {
-    parts.push(`<span>large archive: classes decompile when you open them (${pend} not decompiled yet). Code search covers decompiled files; the <b>strings</b> search covers every class.</span>`);
+    parts.push(`<span>Classes are decompiled when you open them (${pend} not opened yet). Code search covers opened files; the <b>strings</b> search covers every class.</span>`);
   }
   b.hidden = !parts.length;
   b.className = 'banner' + (stack.length && !(S.lazy && pend) ? ' info' : '');
@@ -905,8 +917,8 @@ function renderBatch() {
   h += `<section><h3>FILES · ${rows.length}</h3><table class="batch"><tr><th>result</th><th>file</th><th>what</th><th>top indicators</th></tr>`;
   for (const [r, i] of sorted) {
     const what = r.error ? esc(r.error) : [r.meta && r.meta.name ? esc(r.meta.name) + (r.meta.version ? ' ' + esc(r.meta.version) : '') : '', r.meta ? esc(r.meta.kind) : esc(r.kindLabel), r.classes ? plural(r.classes, 'class') : ''].filter(Boolean).join('<br>');
-    const top = r.summary ? r.summary.findings.filter(f => f.rule.sev !== 'low').slice(0, 3).map(f => esc(f.rule.title)).join('<br>') : '';
-    const lbl = { high: 'HIGH', med: 'REVIEW', low: 'MINOR', none: 'CLEAN', err: 'SKIPPED' }[r.level];
+    const top = r.summary ? [...(r.summary.detections || []).map(d => `<b style="color:var(--danger)">${esc(d.name)}</b>`), ...r.summary.findings.filter(f => f.rule.sev !== 'low').map(f => esc(f.rule.title))].slice(0, 3).join('<br>') : '';
+    const lbl = r.verdict === 'malicious' ? 'MALICIOUS' : { high: 'SUSPICIOUS', med: 'REVIEW', low: 'CLEAN', none: 'CLEAN', err: 'SKIPPED' }[r.level];
     h += `<tr class="brow" data-i="${i}"><td><span class="lvl ${r.level === 'err' ? '' : r.level}">${lbl}</span></td><td><div class="fn">${esc(r.name)}</div><div class="sub">${human(r.size)}</div></td><td class="sub">${what}</td><td class="hits">${top || '<span class="sub">—</span>'}</td></tr>`;
   }
   h += '</table></section><div class="disclaimer">Quick scan of class constant pools and executable strings, no decompiling. Click a file to open it with the full decompiler. "CLEAN" means no rule matched, not that a file is proven safe.</div>';
@@ -927,6 +939,13 @@ function renderScan() {
     <div class="pill"><b>${r.urls.size}</b>urls</div>
     <div class="pill"><b>${r.ips.size}</b>ips</div>
   </div></section>`;
+
+  if (sc.detections && sc.detections.length) {
+    h += '<section><h3>DETECTIONS</h3>' + sc.detections.map(d =>
+      `<div class="detect"><div><span class="dn">${esc(d.name)}</span><span class="dk">${esc(d.kind)}</span></div>` +
+      `<div class="db">${d.kind === 'known malware' ? 'Matches published indicators of this malware. Do not run this file.' : 'Found: ' + d.because.map(esc).join(' + ') + '. That combination is what stealers do. Do not run this file unless you have read the code below.'}</div>` +
+      `<div class="dw">${d.where.slice(0, 8).map(w => fileForClass(w) ? `<a data-cls="${esc(w)}">${esc(dots(w))}</a>` : `<span>${esc(dots(w))}</span>`).join('')}${d.where.length > 8 ? `<span style="color:var(--dim)">+${d.where.length - 8} more</span>` : ''}</div></div>`).join('') + '</section>';
+  }
 
   if (sc.findings.length) {
     h += '<section><h3>INDICATORS</h3>';
