@@ -32,8 +32,10 @@ async function loadSample(name) {
   try {
     el.status.hidden = false;
     setState('fetching sample', 2);
+    name = { jar: 'sample.jar', apk: 'sample.apk', exe: 'sample-wrapped.exe', python: 'sample-python.exe', py: 'sample-python.exe' }[name.toLowerCase()] || name;
     const r = await fetch('/samples/' + encodeURIComponent(name));
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    // the host answers unknown paths with the home page, so check it isn't HTML
+    if (!r.ok || /text\/html/.test(r.headers.get('content-type') || '')) throw new Error(`no sample called "${name}" (try jar, apk, exe or python)`);
     handleFiles([new File([await r.blob()], name)]);
   } catch (e) { showError('could not load sample: ' + (e.message || e)); }
 }
