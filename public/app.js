@@ -366,7 +366,7 @@ function finish(msg, t0) {
     const label = S.batch ? `batch · ${S.batch.length} files` : S.scan ? Scan.VERDICT_TEXT[S.scan.verdict] + (S.scan.detections.length ? ': ' + S.scan.detections.map(d => d.name).join(', ') : '') : '';
     pushHistory({ name: S.name, sha256: S.hashes.sha256 || '', level: lvl, label, type: el.ftype.textContent.split(' · ')[0], t: Date.now() });
   }
-  if (S.lazy || S.engineUsed) {
+  if ((S.lazy || S.engineUsed) && JAVA_AUTO) {
     el.retry.textContent = 'retry with ' + (S.engine === 'vf' ? 'CFR' : 'Vineflower');
     el.retry.hidden = false;
   }
@@ -1039,14 +1039,52 @@ function loadScript(src) {
     document.head.appendChild(s);
   });
 }
+// iPhone / iPad (every iOS browser is Safari underneath): the in-browser JVM doesn't start
+// there, so the built-in quick view is used unless "full source" is tapped.
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const JAVA_AUTO = !IS_IOS && !/[#&]nojava\b/.test(location.hash);
+const JVM_TIMEOUT = +((/[#&]jvmtimeout=(\d+)/.exec(location.hash) || [])[1] || 60) * 1000;
+let cjInit = null;
 function ensureJVM() {
   if (!cjReady) {
     setState('starting the Java engine (first time downloads it, cached after)', null);
-    cjReady = (typeof cheerpjInit === 'function' ? Promise.resolve() : loadScript(CHEERPJ_URL))
-      .then(() => cheerpjInit({ version: 17, status: 'none' }))
-      .catch(e => { cjReady = null; throw e; });
+    if (!cjInit) {
+      cjInit = (typeof cheerpjInit === 'function' ? Promise.resolve() : loadScript(CHEERPJ_URL))
+        .then(() => cheerpjInit({ version: 17, status: 'none' }))
+        .catch(e => { cjInit = null; throw e; });
+    }
+    let timer;
+    const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(
+      `the Java engine did not start within ${JVM_TIMEOUT / 1000} seconds${IS_IOS ? ' (it does not work on iPhone / iPad)' : ''}. The quick view is built in and works without it.`)), JVM_TIMEOUT); });
+    cjReady = Promise.race([cjInit, timeout]).then(v => { clearTimeout(timer); return v; }, e => { clearTimeout(timer); cjReady = null; throw e; });
   }
   return cjReady;
+}
+
+// The class files behind one source file, outer class first.
+async function classBytesOf(f) {
+  const list = [...(f.classes || [])].sort((a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name));
+  const out = [];
+  for (const c of list) out.push({ name: c.name, u8: await c.async('uint8array') });
+  return out;
+}
+async function quickText(f) {
+  if (S.dexMode) {
+    const set = new Set(f.dexClasses);
+    return JView.dexSummary(S.dexMode.parsed.filter(c => set.has(c.name)));
+  }
+  return JView.decompile(await classBytesOf(f));
+}
+// Full decompile in the background; the view refreshes when it lands.
+function startFull(f) {
+  if (f.text != null || f.pending) return;
+  ensureSource(f).catch(e => { f.error = e.message || String(e); }).then(() => {
+    renderBanner();
+    markTree();
+    el.decall.hidden = !(S.lazy && pendingCount() > 0);
+    if (!el.q.value.trim() && !S.usagesOf) updateFoot();
+    if (S.current === f.path && f.view !== 'bc' && f.view !== 'quick') openFile(f.path, { keepScroll: f.text == null });
+  });
 }
 
 function ensureJarPath() {
@@ -1279,6 +1317,7 @@ async function ensureSource(f) {
 
 async function ensureBytecode(f) {
   if (f.bytecode != null) return;
+  if (!S.dexMode) { f.bytecode = JView.disassemble(await classBytesOf(f)) || '// no bytecode'; return; }
   const inPath = await miniJar(f);
   const outPath = `/files/ezlarp-asm/out-${uid()}.zip`;
   await runJava('ezlarp.Asm', CP_D2J, [inPath, outPath]);
@@ -1297,6 +1336,16 @@ el.decall.onclick = async () => {
   el.err.hidden = true;
   const t0 = performance.now();
   try {
+    if (!JAVA_AUTO) {
+      // no Java engine here (iPhone): run the built-in decompiler over every class instead
+      const files = [...S.files.values()].filter(f => f.type === 'src' && f.quick == null);
+      for (let i = 0; i < files.length; i++) {
+        if (i % 50 === 0) { setState(`quick view · ${i}/${files.length} files`, 100 * i / files.length); await new Promise(r => setTimeout(r, 0)); }
+        try { files[i].quick = await quickText(files[i]); } catch (e) { files[i].quick = '// ' + (e.message || e); }
+      }
+      setState(`done · quick view of every class · ${((performance.now() - t0) / 1000).toFixed(1)}s · code search covers all of it`, 100);
+      return;
+    }
     await decompileAll(S.engine, el.fallback.checked);
     setState(`done · ${ENGINES[S.engineUsed]} · ${((performance.now() - t0) / 1000).toFixed(1)}s`, 100);
     renderResult();

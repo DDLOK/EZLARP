@@ -132,6 +132,7 @@
           <select id="outline" class="sm" title="Jump to a class or method" hidden></select>
           <button class="btn ghost sm" id="openjar" hidden>open this jar</button>
           <button class="btn ghost sm" id="usages" title="Classes that reference this one (from the constant pools, no decompile needed)" hidden>usages</button>
+          <button class="btn ghost sm" id="qv" title="Switch between the built-in quick view and the full decompiler (Vineflower / CFR)" hidden>full source</button>
           <button class="btn ghost sm" id="bc" title="Show JVM bytecode for this class" hidden>bytecode</button>
           <button class="btn ghost sm" id="wrap" title="Toggle word wrap">wrap</button>
           <button class="btn ghost sm" id="copy">copy</button>
@@ -174,8 +175,9 @@
 <div class="overlay" id="overlay" hidden><div>drop to analyze</div></div>
 <pre id="console" hidden></pre>
 
-<footer class="foot">EZLARP &middot; v0.7 &middot; Vineflower 1.12.0 / CFR 0.152 / dex2jar 2.4 on CheerpJ 5 &middot; static heuristics, not an antivirus</footer>
+<footer class="foot">EZLARP &middot; v0.8 &middot; Vineflower 1.12.0 / CFR 0.152 / dex2jar 2.4 on CheerpJ 5 &middot; static heuristics, not an antivirus</footer>
 <script src="/inspect.js"></script>
+<script src="/jview.js"></script>
 <script src="/scan.js"></script>
 <script src="/ui.js"></script>
 <script src="/app.js"></script>

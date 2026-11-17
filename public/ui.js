@@ -21,7 +21,7 @@ const el = {};
 for (const id of ['drop', 'file', 'pick', 'engine', 'fallback', 'rename', 'status', 'ficon', 'verdict', 'fname', 'fsize', 'ftype',
   'fstate', 'fmd5', 'fsha1', 'fhash', 'vt', 'ftags', 'fill', 'err', 'result', 'rtabs', 'scandot', 'decall', 'retry', 'report', 'dl',
   'banner', 'q', 'qmode', 'tree', 'sidefoot', 'ftabs', 'cpath', 'cmeta', 'outline', 'openjar', 'bc', 'wrap', 'copy', 'dlone',
-  'codebox', 'gutter', 'code', 'preview', 'usages', 'urlform', 'url', 'cmp', 'cmpfile', 'cmpview', 'recent', 'recentlist', 'clearhist', 'scan', 'details', 'sq', 'skind', 'scount', 'strings', 'logbox', 'overlay', 'console']) {
+  'codebox', 'gutter', 'code', 'preview', 'usages', 'qv', 'urlform', 'url', 'cmp', 'cmpfile', 'cmpview', 'recent', 'recentlist', 'clearhist', 'scan', 'details', 'sq', 'skind', 'scount', 'strings', 'logbox', 'overlay', 'console']) {
   el[id] = $(id);
 }
 
@@ -239,8 +239,10 @@ function renderBanner() {
     parts.push(`<span class="crumbs">${crumbs} › <b>${esc(S.name)}</b></span>`);
   }
   const pend = pendingCount();
-  if (S.lazy && pend) {
-    parts.push(`<span>Classes are decompiled when you open them (${pend} not opened yet). Code search covers opened files; the <b>strings</b> search covers every class.</span>`);
+  if (S.lazy && pend && typeof JAVA_AUTO !== 'undefined' && !JAVA_AUTO) {
+    parts.push(`<span>Code is shown by EZLARP's built-in decompiler: instant and works on ${IS_IOS ? 'iPhone / iPad' : 'every device'}. Loops show as labels + goto. "decompile all" makes code search cover every class.</span>`);
+  } else if (S.lazy && pend) {
+    parts.push(`<span>Code shows instantly in quick view, then Vineflower's full source replaces it (${pend} classes not opened yet). Code search covers opened files; the <b>strings</b> search covers every class.</span>`);
   }
   b.hidden = !parts.length;
   b.className = 'banner' + (stack.length && !(S.lazy && pend) ? ' info' : '');
@@ -402,26 +404,27 @@ function renderCodeSearch(q) {
   let hits = 0, filesHit = 0, searched = 0;
   outer: for (const p of sortedPaths()) {
     const f = S.files.get(p);
-    if (f.text == null) continue;
+    const txt = f.text != null ? f.text : f.quick;
+    if (txt == null) continue;
     searched++;
     const matches = [];
     if (re) {
       re.lastIndex = 0;
-      for (let m; (m = re.exec(f.text)) && matches.length < 200;) { matches.push([m.index, m[0].length || 1]); if (!m[0].length) re.lastIndex++; }
+      for (let m; (m = re.exec(txt)) && matches.length < 200;) { matches.push([m.index, m[0].length || 1]); if (!m[0].length) re.lastIndex++; }
     } else {
-      const lower = f.text.toLowerCase();
+      const lower = txt.toLowerCase();
       for (let i = lower.indexOf(ql); i >= 0 && matches.length < 200; i = lower.indexOf(ql, i + ql.length)) matches.push([i, q.length]);
     }
     if (!matches.length) continue;
     filesHit++;
     let lastLine = -1;
     for (const [idx, len] of matches) {
-      const lineNo = countLines(f.text, idx);
+      const lineNo = countLines(txt, idx);
       if (lineNo === lastLine) continue;
       lastLine = lineNo;
-      const ls = f.text.lastIndexOf('\n', idx - 1) + 1;
-      let le = f.text.indexOf('\n', idx); if (le < 0) le = f.text.length;
-      const line = f.text.slice(ls, le);
+      const ls = txt.lastIndexOf('\n', idx - 1) + 1;
+      let le = txt.indexOf('\n', idx); if (le < 0) le = txt.length;
+      const line = txt.slice(ls, le);
       const col = idx - ls;
       const a = Math.max(0, col - 40);
       const snip = esc(line.slice(a, col).trimStart()) + '<mark>' + esc(line.slice(col, col + len)) + '</mark>' + esc(line.slice(col + len, col + len + 80));
@@ -562,6 +565,7 @@ async function openFile(path, opts = {}) {
   el.dlone.textContent = f.type === 'py' ? 'download .pyc' : 'download';
   el.usages.hidden = f.type !== 'src' || !S.xrefs.size;
   el.bc.textContent = f.view === 'bc' ? 'source' : 'bytecode';
+  el.qv.hidden = true;
   el.outline.hidden = true;
   el.preview.hidden = true;
   el.code.parentElement.hidden = false;
@@ -589,20 +593,29 @@ async function openFile(path, opts = {}) {
       text = f.bytecode;
       el.cmeta.textContent = `bytecode · ${text.split('\n').length} lines`;
     } else {
-      if (f.text == null && !f.error) {
-        showPlaceholder(`// decompiling ${baseOf(path)} with ${ENGINES[S.engine]}…\n// (first one per visit also starts the JVM)`);
-        try { await ensureSource(f); } catch (e) { f.error = e.message || String(e); }
-        if (seq !== openSeq) return;
-        renderBanner();
-        el.decall.hidden = !(S.lazy && pendingCount() > 0);
-        markTree();
-        if (!el.q.value.trim() && !S.usagesOf) updateFoot();
+      if (f.text == null || f.view === 'quick') {
+        // built-in quick view: instant and needs no Java runtime
+        if (f.quick == null) {
+          try { f.quick = await quickText(f); } catch (e) { f.quick = '// quick view failed: ' + (e.message || e); }
+          if (seq !== openSeq) return;
+        }
+        if (f.text == null && !f.error && (JAVA_AUTO || f.fullRequested)) startFull(f);
       }
       el.codebox.classList.remove('loading');
-      text = f.text != null ? f.text : `// ${ENGINES[S.engine]} could not decompile this class\n// ${String(f.error).split('\n').join('\n// ')}\n// try "retry with" the other engine, or view the bytecode`;
+      f.showingQuick = f.text == null || f.view === 'quick';
       lang = 'java';
-      const lines = text.split('\n').length;
-      el.cmeta.textContent = `${lines} lines · ${human(new Blob([text]).size)} · ${ENGINES[f.engine || S.engineUsed || S.engine]}`;
+      if (f.showingQuick) {
+        text = f.quick;
+        if (f.error && f.fullRequested !== false) text = `// full decompiler (${ENGINES[S.engine]}) failed: ${String(f.error).split('\n').join('\n// ')}\n` + text;
+        el.cmeta.textContent = 'quick view · built in' + (f.pending ? ` · ${ENGINES[S.engine]} running…` : '');
+        el.qv.textContent = f.text != null ? 'full source' : f.pending ? 'full source (loading)' : 'full source';
+      } else {
+        text = f.text;
+        const lines = text.split('\n').length;
+        el.cmeta.textContent = `${lines} lines · ${human(new Blob([text]).size)} · ${ENGINES[f.engine || S.engineUsed || S.engine]}`;
+        el.qv.textContent = 'quick view';
+      }
+      el.qv.hidden = false;
       renderOutline(text);
     }
   } else {
@@ -633,10 +646,11 @@ async function openFile(path, opts = {}) {
       text = hexDump(f.bytes.subarray(0, 8192)) + (f.size > 8192 ? `\n… ${human(f.size - 8192)} more (download to see all)` : '');
     }
   }
+  f.shown = text;
   renderCode(text, lang);
   if (opts.line) scrollToLine(opts.line);
   else if (opts.find) scrollToFind(text, opts.find);
-  else el.codebox.scrollTop = 0;
+  else if (!opts.keepScroll) el.codebox.scrollTop = 0;
 }
 
 function clearViewer() {
@@ -830,14 +844,14 @@ function resolveClass(word, text) {
 
 function tryJump(word) {
   const f = S.files.get(S.current);
-  if (!f || f.type !== 'src' || f.text == null) return false;
-  const r = resolveClass(word, f.text);
+  if (!f || f.type !== 'src' || f.shown == null) return false;
+  const r = resolveClass(word, f.shown);
   if (!r) return false;
   const simple = r.internal.slice(r.internal.lastIndexOf('/') + 1).split('$').pop();
   const re = new RegExp('(?:class|interface|enum|record)\\s+' + simple.replace(/\$/g, '\\$') + '\\b');
   if (r.path === S.current) {
-    const m = re.exec(f.text);
-    if (m) scrollToLine(countLines(f.text, m.index));
+    const m = re.exec(f.shown);
+    if (m) scrollToLine(countLines(f.shown, m.index));
     return true;
   }
   openFile(r.path).then(() => {
@@ -874,7 +888,7 @@ el.wrap.onclick = () => el.codebox.classList.toggle('wrap');
 el.copy.onclick = () => {
   const f = S.files.get(S.current);
   if (!f) return;
-  const t = f.type === 'src' && f.view === 'bc' ? f.bytecode : f.text;
+  const t = f.type === 'src' ? f.shown : f.text;
   if (t != null) copyText(t, el.copy);
 };
 
@@ -885,7 +899,7 @@ el.dlone.onclick = async () => {
   if (f.type === 'diff') { download(baseOf(f.path) + '.diff', f.text, 'text/plain'); return; }
   if (f.type === 'src') {
     if (f.view === 'bc') download(baseOf(f.path).replace(/\.java$/, '.bytecode.txt'), f.bytecode || '', 'text/plain');
-    else download(baseOf(f.path), f.text || '', 'text/plain');
+    else download(baseOf(f.path), f.shown || '', 'text/plain');
   } else {
     download(baseOf(f.path), f.bytes || (f.zipEntry ? await f.zipEntry.async('uint8array') : f.text));
   }
@@ -895,6 +909,16 @@ el.bc.onclick = () => {
   const f = S.files.get(S.current);
   if (!f || f.type !== 'src') return;
   f.view = f.view === 'bc' ? 'src' : 'bc';
+  openFile(f.path);
+};
+// quick view <-> full source (Vineflower / CFR)
+el.qv.onclick = () => {
+  const f = S.files.get(S.current);
+  if (!f || f.type !== 'src') return;
+  if (f.showingQuick) {
+    f.view = 'src';
+    if (f.text == null) { f.fullRequested = true; f.error = null; startFull(f); }
+  } else f.view = 'quick';
   openFile(f.path);
 };
 

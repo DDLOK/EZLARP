@@ -37,6 +37,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   const drop = async file => { await reset(); await page.setInputFiles('#file', Array.isArray(file) ? file.map(f => path.join(FX, f)) : path.join(FX, file)); };
   const code = () => page.textContent('#code');
   const waitCode = (re, ms = 60000) => page.waitForFunction(r => new RegExp(r).test(document.getElementById('code').textContent), re.source, { timeout: ms }).then(() => true, () => false);
+  const waitFull = (ms = 120000) => page.waitForFunction(() => { const f = S.files.get(S.current); return f && f.text != null && !/Quick view/.test(el.code.textContent); }, null, { timeout: ms }).then(() => true, () => false);
   const shot = n => page.screenshot({ path: `${SHOTS}/${n}.png` });
 
   // classic mode: small files decompile fully up front (#lazy=150), so the source-view tests below apply
@@ -136,7 +137,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await page.evaluate(() => openFile('demo/mod/ScanDemo.java'));
   await waitCode(/class ScanDemo/);
   await page.click('#bc');
-  ok(await waitCode(/INVOKEVIRTUAL|INVOKESTATIC|GETSTATIC/), 'bytecode view');
+  ok(await waitCode(/invokevirtual|invokestatic|getstatic/i), 'bytecode view');
   ok(!(await page.$eval('#codebox', e => e.classList.contains('loading'))), 'bytecode not dimmed');
   await page.click('#bc');
   ok(await waitCode(/class ScanDemo/), 'back to source');
@@ -376,14 +377,14 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await drop('big.jar');
   ok(!(await waitState(/^scan done/, 180000)), 'lazy ready', await state());
   ok(!(await page.$eval('#decall', e => e.hidden)), 'decompile-all button', await page.evaluate(() => JSON.stringify({ st: el.fstate.textContent, lazy: S.lazy, name: S.name, pend: pendingCount(), err: el.err.hidden ? '' : el.err.textContent })));
-  ok(/decompiled when you open them/.test(await page.textContent('#banner')), 'lazy banner');
+  ok(/full source replaces it/.test(await page.textContent('#banner')), 'lazy banner');
   ok(await waitCode(/class Main|public class/, 120000), 'entry class decompiled on demand');
   await page.click('.rtab[data-view=source]');
   await page.click('#qmode [data-m=files]');
   await page.fill('#q', 'CfrDriver.java');
   await page.waitForTimeout(200);
   await page.press('#q', 'Enter');
-  ok(await waitCode(/interface CfrDriver/, 120000), 'clicked class decompiles on demand');
+  ok(await waitCode(/interface CfrDriver/, 120000) && await waitFull(), 'clicked class decompiles on demand');
   await page.fill('#q', '');
   await page.press('#q', 'Escape');
   ok(/\(2 decompiled\)/.test(await page.textContent('#sidefoot')), 'footer counts decompiled', await page.textContent('#sidefoot'));
@@ -410,6 +411,71 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   ok(await waitCode(/class ExampleMod/), 'CODE tab decompiles the entry class');
   ok(await page.evaluate(() => !!document.querySelector('script[src*="cjrtnc"]')), 'Java engine loaded on demand');
   await shot('12-report-first');
+
+  // ---------------- iPhone: built-in quick view, Java engine never loaded
+  console.log('iphone quick view');
+  {
+    const { devices } = require(process.env.PLAYWRIGHT || 'playwright');
+    const ictx = await browser.newContext({ ...devices['iPhone 13'] });
+    let cjLoads = 0;
+    await ictx.route(/cjrtnc\.leaningtech\.com/, r => { cjLoads++; r.fulfill({ contentType: 'text/javascript', body: stub }); });
+    await ictx.route(/cdnjs\.cloudflare\.com/, r => r.abort());
+    const ip = await ictx.newPage();
+    ip.on('pageerror', e => errors.push('iphone: ' + e.message));
+    await ip.goto(BASE + '/');
+    await ip.evaluate(() => loadSample('sample.jar'));
+    await ip.waitForFunction(() => /^scan done/.test(el.fstate.textContent), null, { timeout: 60000 });
+    await ip.click('.rtab[data-view=source]');
+    const t0 = Date.now();
+    await ip.waitForFunction(() => /class ExampleMod/.test(el.code.textContent), null, { timeout: 5000 }).catch(() => {});
+    ok(/Quick view/.test(await ip.textContent('#code')) && /class ExampleMod/.test(await ip.textContent('#code')), 'iphone: quick view shows code', (await ip.textContent('#code')).slice(0, 200));
+    ok(Date.now() - t0 < 3000, 'iphone: code in under 3 s', Date.now() - t0);
+    ok(/quick view/.test(await ip.textContent('#cmeta')) && (await ip.textContent('#qv')) === 'full source', 'iphone: quick meta + full-source button');
+    await ip.evaluate(() => openFile('demo/mod/ScanDemo.java'));
+    await ip.waitForFunction(() => /getAccessToken/.test(el.code.textContent), null, { timeout: 5000 }).catch(() => {});
+    ok(/discord\.com\/api\/webhooks/.test(await ip.textContent('#code')) && /getAccessToken\(\)/.test(await ip.textContent('#code')), 'iphone: strings + calls visible');
+    await ip.click('#bc');
+    await ip.waitForFunction(() => /invokevirtual/.test(el.code.textContent), null, { timeout: 5000 }).catch(() => {});
+    ok(/invokevirtual/.test(await ip.textContent('#code')), 'iphone: bytecode without Java');
+    ok(cjLoads === 0, 'iphone: Java engine never downloaded', cjLoads);
+    await ip.click('#decall');
+    await ip.waitForFunction(() => /quick view of every class/.test(el.fstate.textContent), null, { timeout: 20000 }).catch(() => {});
+    ok(/quick view of every class/.test(await ip.textContent('#fstate')), 'iphone: decompile all = quick view of everything', await ip.textContent('#fstate'));
+    await ip.screenshot({ path: `${SHOTS}/13-iphone-quick.png` });
+    await ictx.close();
+  }
+
+  // ---------------- desktop with a Java engine that never starts: timeout, quick view stays
+  console.log('hanging jvm');
+  {
+    const hctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    await hctx.route(/cjrtnc\.leaningtech\.com/, r => r.fulfill({ contentType: 'text/javascript', body: 'window.cheerpjInit = () => new Promise(() => {});' }));
+    await hctx.route(/cdnjs\.cloudflare\.com/, r => r.abort());
+    const hp = await hctx.newPage();
+    hp.on('pageerror', e => errors.push('hang: ' + e.message));
+    await hp.goto(BASE + '/#jvmtimeout=3');
+    await hp.evaluate(() => loadSample('sample.jar'));
+    await hp.waitForFunction(() => /^scan done/.test(el.fstate.textContent), null, { timeout: 60000 });
+    await hp.click('.rtab[data-view=source]');
+    await hp.waitForFunction(() => /class ExampleMod/.test(el.code.textContent), null, { timeout: 5000 }).catch(() => {});
+    ok(/Quick view/.test(await hp.textContent('#code')), 'hang: quick view while the engine loads');
+    await hp.waitForFunction(() => /did not start within 3 seconds/.test(el.code.textContent), null, { timeout: 15000 }).catch(() => {});
+    ok(/did not start within 3 seconds/.test(await hp.textContent('#code')) && /class ExampleMod/.test(await hp.textContent('#code')), 'hang: timeout message, code still shown', (await hp.textContent('#code')).slice(0, 300));
+    await hctx.close();
+  }
+
+  // ---------------- desktop: quick view is replaced by Vineflower when it finishes
+  console.log('quick -> full');
+  await page.goto(BASE + '/?q2');
+  await sample('sample.jar');
+  await waitState(/^scan done/);
+  await page.click('.rtab[data-view=source]');
+  ok(await waitFull(), 'full source replaces quick view');
+  ok(!/Quick view/.test(await code()) && (await page.textContent('#qv')) === 'quick view', 'toggle offers quick view');
+  await page.click('#qv');
+  ok(/Quick view/.test(await code()), 'toggle to quick view');
+  await page.click('#qv');
+  ok(!/Quick view/.test(await code()), 'toggle back to full');
 
   ok(errors.length === 0, 'no page errors', errors.slice(0, 5));
   console.log(`\n${pass} passed, ${fail} failed`);
