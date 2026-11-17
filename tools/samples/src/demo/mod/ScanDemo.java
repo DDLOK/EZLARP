@@ -12,6 +12,8 @@ final class ScanDemo {
   static final String NOTE = "EZLARP scan demo: inert placeholders, not real endpoints";
   static final String FAKE_WEBHOOK = "https://discord.com/api/webhooks/000000000000000000/EZLARP-DEMO-NOT-A-REAL-WEBHOOK";
   static final String FAKE_IP_LOOKUP = "https://api.ipify.org/?demo=ezlarp";
+  // base64 of "https://example.org/ezlarp-demo/hidden-url-not-real" (shows the decoder)
+  static final String HIDDEN = "aHR0cHM6Ly9leGFtcGxlLm9yZy9lemxhcnAtZGVtby9oaWRkZW4tdXJsLW5vdC1yZWFs";
 
   private ScanDemo() {}
 

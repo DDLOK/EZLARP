@@ -65,6 +65,11 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   const scanText = await page.textContent('#scan');
   ok(/Discord webhook URL/.test(scanText) && /Reads the Minecraft session token/.test(scanText) && /Runs system commands/.test(scanText), 'scan findings');
   ok(/api\.ipify\.org/.test(scanText), 'url list');
+  ok(/DECODED HIDDEN STRINGS/.test(scanText) && /example\.org\/ezlarp-demo\/hidden-url-not-real/.test(scanText), 'base64 decoded');
+  await page.click('#copysum');
+  await page.waitForTimeout(200);
+  const summ = await page.evaluate(() => navigator.clipboard.readText());
+  ok(/^\*\*sample\.jar\*\*/.test(summ) && /hxxps:\/\/discord\[\.\]com/.test(summ), 'copy summary', summ.slice(0, 200));
   await shot('02-scan');
   await page.click('#scan .finding.high a[data-cls]');
   ok(await waitCode(/FAKE_WEBHOOK/), 'finding location opens ScanDemo');
@@ -200,7 +205,19 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   console.log('nested');
   await drop('nested.jar');
   ok(!(await waitState(/^done/)), 'nested outer', await state());
-  await page.evaluate(() => openFile('inner-mod.jar'));
+  ok(await page.$eval('#verdict', e => e.classList.contains('high')), 'nested: inner jar findings reach the verdict');
+  await page.click('.rtab[data-view=scan]');
+  const nscan = await page.textContent('#scan');
+  ok(/INSIDE THIS ARCHIVE/.test(nscan) && /inner-mod\.jar/.test(nscan) && /lib-native\.dll/.test(nscan) && /NATIVE/.test(nscan), 'nested table', nscan.slice(0, 300));
+  ok(/Bundled native binaries/.test(nscan), 'native rule');
+  await reset();
+  await page.click('#scan a[data-cls="META-INF/jars/inner-mod.jar!demo/mod/ScanDemo"]');
+  ok(!(await waitState(/^done/)), 'nested finding opens inner jar', await state());
+  ok(await waitCode(/FAKE_WEBHOOK/), 'nested finding opens the class');
+  await page.click('#banner [data-up]');
+  await page.waitForTimeout(300);
+  await page.click('.rtab[data-view=source]');
+  await page.evaluate(() => openFile('META-INF/jars/inner-mod.jar'));
   await page.waitForSelector('#openjar:not([hidden])');
   await reset();
   await page.click('#openjar');
@@ -209,6 +226,24 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await page.click('#banner [data-up]');
   await page.waitForTimeout(300);
   ok(/nested\.jar/.test(await page.textContent('#fname')) && /readme\.txt/.test(await page.textContent('#tree')), 'back to parent');
+
+  // ---------------- python (PyInstaller)
+  console.log('python');
+  await sample('sample-python.exe');
+  ok(!(await waitState(/analysis done/)), 'python exe', await state());
+  ok(/PyInstaller/.test(await page.textContent('#ftags')) && /2 Python modules/.test(await page.textContent('#ftags')), 'python tags', await page.textContent('#ftags'));
+  ok(/demo_main\.py/.test(await page.textContent('#tree')) && /helper\.py/.test(await page.textContent('#tree')), 'python tree');
+  ok(await waitCode(/def candidate_paths/), 'entry script opened first');
+  ok(/discord\.com\/api\/webhooks/.test(await code()), 'python strings listed');
+  ok(await page.$eval('#verdict', e => e.classList.contains('high')), 'python webhook flagged');
+  const [dpyc] = await Promise.all([page.waitForEvent('download'), page.click('#dlone')]);
+  const pycPath = path.join(SHOTS, dpyc.suggestedFilename()); await dpyc.saveAs(pycPath);
+  const pyc = fs.readFileSync(pycPath);
+  ok(dpyc.suggestedFilename() === 'demo_main.pyc' && pyc[2] === 0x0d && pyc[3] === 0x0a && pyc.length > 100, 'pyc download with header', [dpyc.suggestedFilename(), pyc.subarray(0, 4)]);
+  await page.evaluate(() => openFile('helper.py'));
+  ok(await waitCode(/class Banner:[\s\S]*def Banner\.render/), 'helper module outline');
+  ok(!/Launch4j/.test(await page.textContent('#ftags')), 'python sample not tagged launch4j');
+  await shot('11-python');
 
   // ---------------- native exe
   console.log('native exe');
@@ -228,6 +263,49 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await drop('junk.bin');
   const jerr = await waitState(/error/);
   ok(/unsupported file type/.test(jerr), 'junk rejected');
+
+  // ---------------- open from a link (same-origin path)
+  console.log('url');
+  await reset();
+  await page.fill('#url', '/samples/sample.apk');
+  await page.press('#url', 'Enter');
+  ok(!(await waitState(/^done/)), 'url load', await state());
+  ok(/from 127\.0\.0\.1/.test(await page.textContent('#ftags')), 'url source tag');
+  await reset();
+  await page.fill('#url', 'http://127.0.0.1:1/nothing.jar');
+  await page.press('#url', 'Enter');
+  ok(/CORS|download/.test(await waitState(/error/)), 'url failure explained');
+
+  // ---------------- modrinth modpack
+  console.log('mrpack');
+  await drop('pack.mrpack');
+  ok(!(await waitState(/^done/)), 'mrpack', await state());
+  ok(/EZLARP Test Pack/.test(await page.textContent('#details')) && /mods\/bad-hash\.jar/.test(await page.textContent('#details')), 'mrpack details');
+  await reset();
+  await page.click('#mrscan');
+  ok(!(await waitState(/^batch done/)), 'mrpack batch', await state());
+  const mrows = await page.$$eval('#scan table.batch tr.brow', r => r.map(x => x.textContent));
+  ok(mrows.length === 2 && /^HIGH.*sample\.jar/.test(mrows[0]) && /SKIPPED.*hash does not match/.test(mrows[1]), 'mrpack rows (hash check)', mrows);
+
+  // ---------------- compare
+  console.log('compare');
+  await drop('sample-old.jar');
+  ok(!(await waitState(/^done/)), 'old version', await state());
+  ok(!(await page.$eval('#cmp', e => e.hidden)), 'compare button');
+  await page.setInputFiles('#cmpfile', path.join(FX, 'mods-a.jar'));
+  await page.waitForSelector('#cmpview .scan-sum', { timeout: 60000 });
+  const cmpText = await page.textContent('#cmpview');
+  ok(/NEW INDICATORS/.test(cmpText) && /Discord webhook URL/.test(cmpText) && /not in the old version at all/.test(cmpText), 'compare new indicators', cmpText.slice(0, 400));
+  ok(/\+1\s*classes added/.test(cmpText) && /ADDED CLASSES/.test(cmpText), 'compare added class', cmpText.slice(0, 600));
+  await shot('12-compare');
+  await page.click('#cmpview a[data-cdiff="demo/mod/ScanDemo"]');
+  ok(await waitCode(/\+\s*static final String FAKE_WEBHOOK/), 'diff of added class');
+  ok(/^diff · \+\d+ −0$/.test(await page.textContent('#cmeta')), 'diff stats', await page.textContent('#cmeta'));
+  await page.click('.rtab[data-view=compare]');
+  await page.click('#cmpview a[data-rdiff="fabric.mod.json"]');
+  ok(await waitCode(/-\s*"version": "0\.9\.0"[\s\S]*\+\s*"version": "1\.0\.0"/), 'resource diff');
+  ok(await page.$$eval('#code .hljs-deletion', x => x.length) === 1 && await page.$$eval('#code .hljs-addition', x => x.length) === 1, 'diff colored');
+  await shot('13-diff');
 
   // ---------------- batch
   console.log('batch');

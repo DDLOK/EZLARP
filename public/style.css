@@ -297,3 +297,20 @@ table.batch .hits{color:#bbb;font-size:11px}
 .usage-head{padding:8px 10px;font:11px var(--mono);color:var(--mute);border-bottom:1px solid var(--line);display:flex;gap:8px}
 .usage-head b{color:var(--fg)}
 .usage-head a{margin-left:auto;color:var(--accent2);cursor:pointer}
+
+.scan-sum{align-items:center}
+
+.urlrow{display:flex;gap:6px;max-width:560px;margin:0 auto 14px}
+.urlrow input{flex:1;min-width:0;background:#0b0b0b;border:1px solid var(--line2);color:var(--fg);border-radius:6px;padding:6px 9px;font:12px var(--mono);outline:none}
+.urlrow input:focus{border-color:#335a42}
+.view[data-view=compare]{max-height:72vh;overflow:auto}
+.hljs-addition{color:var(--accent);background:#0f2016;display:inline-block;width:100%}
+.hljs-deletion{color:#ff8b94;background:#200f12;display:inline-block;width:100%}
+.hljs-meta{color:var(--accent2)}
+.cmp-list{font:12px var(--mono);columns:2 300px}
+.cmp-list a{display:block;color:#cfcfcf;cursor:pointer;padding:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmp-list a:hover{color:var(--accent)}
+.cmp-list a.add::before{content:"+ ";color:var(--accent)}
+.cmp-list a.del::before{content:"− ";color:var(--danger)}
+.cmp-list a.chg::before{content:"~ ";color:var(--warn)}
+.finding.new{box-shadow:inset 0 0 0 1px #4a2228}

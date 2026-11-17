@@ -3,13 +3,13 @@
 
   sample-wrapped.exe  = minimal synthetic PE stub + sample.jar appended (Launch4j-style layout)
   sample.apk          = zip of classes.dex + a hand-encoded binary AndroidManifest.xml
+  sample-python.exe   = PE stub + PyInstaller-style CArchive (script + PYZ) built with this python3
 
 usage: make.py <sample.jar> <classes.dex> <out-dir>
 """
-import struct, sys, zipfile
+import importlib.util, marshal, os, struct, sys, zlib, zipfile
 
-def pe_stub():
-    text = b'EZLARP sample stub. Not a real launcher: laid out like a launch4j wrapper so the jar extractor has something to find.\0'
+def pe_stub(text=b'EZLARP sample stub. Not a real launcher: laid out like a launch4j wrapper so the jar extractor has something to find.\0'):
     text = text.ljust(512, b'\0')
     dos = bytearray(64); dos[0:2] = b'MZ'; struct.pack_into('<I', dos, 0x3c, 64)
     coff = struct.pack('<HHIIIHH', 0x8664, 1, 0x60000000, 0, 0, 240, 0x0022)
@@ -74,8 +74,37 @@ def axml(root):
     total = 8 + len(pool) + len(resmap) + len(body)
     return struct.pack('<HHI', 0x0003, 8, total) + pool + resmap + bytes(body)
 
+def pyinstaller(src_dir):
+    """PyInstaller 6 layout: CArchive with one script entry and a PYZ of modules."""
+    magic = importlib.util.MAGIC_NUMBER
+    def code(name):
+        path = os.path.join(src_dir, name + '.py')
+        return marshal.dumps(compile(open(path).read(), name + '.py', 'exec'))
+    # PYZ: b'PYZ\0' + magic + toc offset, zlib(marshal(code)) entries, marshal(toc)
+    body, toc = b'', []
+    for mod in ['helper']:
+        data = zlib.compress(code(mod))
+        toc.append((mod, (0, 12 + len(body), len(data))))
+        body += data
+    pyz = b'PYZ\0' + magic + struct.pack('!I', 12 + len(body)) + body + marshal.dumps(toc)
+    entries = [('demo_main', zlib.compress(code('demo_main')), len(code('demo_main')), 1, b's'),
+               ('PYZ-00.pyz', pyz, len(pyz), 0, b'z')]
+    data, tocb = b'', b''
+    for name, blob, usize, comp, typ in entries:
+        nm = name.encode() + b'\0'
+        nm = nm.ljust((len(nm) + 15) // 16 * 16, b'\0')
+        tocb += struct.pack('!IIIIBc', 18 + len(nm), len(data), len(blob), usize, comp, typ) + nm
+        data += blob
+    ver = sys.version_info.major * 100 + sys.version_info.minor
+    pkglen = len(data) + len(tocb) + 88
+    cookie = struct.pack('!8sIIii64s', b'MEI\014\013\012\013\016', pkglen, len(data), len(tocb), ver,
+                         ('python%d%d.dll' % sys.version_info[:2]).encode())
+    return pe_stub(b'EZLARP sample stub: an inert PyInstaller-style bundle.\0') + data + tocb + cookie
+
 def main():
     jar, dex, out = sys.argv[1:4]
+    with open(out + '/sample-python.exe', 'wb') as f:
+        f.write(pyinstaller(os.path.join(os.path.dirname(__file__), 'python')))
     with open(out + '/sample-wrapped.exe', 'wb') as f:
         f.write(pe_stub() + open(jar, 'rb').read())
     manifest = axml(('manifest', {

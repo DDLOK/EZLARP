@@ -95,6 +95,12 @@ const Scan = (() => {
     { id: 'file-delete', sev: 'low', title: 'Deletes files',
       why: 'Removes files or schedules removal on exit.',
       refs: ['java/io/File.delete', 'java/io/File.deleteOnExit', 'java/nio/file/Files.delete', 'java/nio/file/Files.deleteIfExists'] },
+    { id: 'encoded', sev: 'med', title: 'Hidden string (base64 / hex / reversed)',
+      why: 'A URL, path or command stored encoded so it doesn\'t show up in a plain text search. Legit code rarely hides URLs this way.',
+      encoded: true },
+    { id: 'jar-native', sev: 'low', title: 'Bundled native binaries',
+      why: 'The archive ships .dll / .so / .dylib / .exe files. Their code is outside what a Java decompiler can show; their strings were scanned.',
+      native: true },
     { id: 'obf-tool', sev: 'low', title: 'Obfuscator marker',
       why: 'Left behind by a commercial or public obfuscator.',
       str: /Allatori|ZKM \d|Stringer Java Obfuscator|skidfuscator|paramorphism|branchlock|qprotect|Obfuscated (?:by|with)|radon\b.*obfuscat/i },
@@ -106,6 +112,8 @@ const Scan = (() => {
   const BORING_HOST = /^(?:www\.)?(?:w3\.org|apache\.org|xml\.org|java\.sun\.com|oracle\.com|xmlsoap\.org|json-schema\.org|purl\.org|openjdk\.java\.net|mozilla\.org|gnu\.org|opensource\.org|schemas\.android\.com|schemas\.microsoft\.com|ns\.adobe\.com|localhost|127\.0\.0\.1|0\.0\.0\.0|example\.com|slf4j\.org|eclipse\.org|jcp\.org|creativecommons\.org)$/i;
 
   const refIndex = new Map();   // "owner.member" -> rules
+  const ENCODED = RULES.find(r => r.encoded);
+  const NATIVE = RULES.find(r => r.native);
   const clsRules = [];
   const strRules = [];
   for (const r of RULES) {
@@ -130,9 +138,53 @@ const Scan = (() => {
     if (s.size < 20) s.add(where);
   }
 
-  function scanString(res, s, where) {
+  // ---- encoded strings
+  const B64_RE = /^[A-Za-z0-9+/_-]{16,}={0,2}$/;
+  const HEX_RE = /^(?:[0-9a-fA-F]{2}){10,}$/;
+  const INTERESTING = /\b(?:https?|wss?|ftp|tcp):\/\/|webhook|\\AppData|\\Local Storage|Login Data|leveldb|powershell|cmd\.exe|\.exe\b|\/bin\/|HKEY_|discord|telegram|token/i;
+  function printable(t) {
+    if (!t || t.length < 6) return false;
+    let ok = 0;
+    for (let i = 0; i < t.length; i++) { const c = t.charCodeAt(i); if ((c >= 32 && c < 127) || c === 9 || c === 10 || c === 13) ok++; }
+    return ok / t.length > 0.95;
+  }
+  function decodeB64(t) {
+    if (!B64_RE.test(t) || /^[a-z]+$|^[A-Z]+$|^[0-9]+$/.test(t)) return null;
+    try {
+      const norm = t.replace(/-/g, '+').replace(/_/g, '/');
+      const bin = atob(norm + '='.repeat((4 - norm.length % 4) % 4));
+      return printable(bin) ? bin : null;
+    } catch (e) { return null; }
+  }
+  function decodeHex(t) {
+    if (!HEX_RE.test(t)) return null;
+    let out = '';
+    for (let i = 0; i < t.length; i += 2) out += String.fromCharCode(parseInt(t.substr(i, 2), 16));
+    return printable(out) ? out : null;
+  }
+  function decodings(s) {
+    const out = [];
+    const b = decodeB64(s); if (b) out.push(['base64', b]);
+    const h = decodeHex(s); if (h) out.push(['hex', h]);
+    if (s.length >= 12 && /^[\x20-\x7e]+$/.test(s)) {
+      const r = [...s].reverse().join('');
+      if (/^(?:https?|wss?):\/\//i.test(r) || /discord(?:app)?\.com\/api\/webhooks/i.test(r)) out.push(['reversed', r]);
+    }
+    return out;
+  }
+
+  function scanString(res, s, where, nested) {
     if (s.length < 3 || s.length > 4000) return;
-    for (const r of strRules) if (r.str.test(s)) hit(res, r, where, s);
+    for (const r of strRules) if (r.str.test(s)) hit(res, r, where, nested ? `${nested}: ${s}` : s);
+    if (!nested && s.length >= 12) {
+      for (const [kind, dec] of decodings(s)) {
+        if (!INTERESTING.test(dec)) continue;
+        hit(res, ENCODED, where, `${kind} "${s.length > 60 ? s.slice(0, 60) + '…' : s}" → ${dec}`);
+        res.decoded = res.decoded || [];
+        if (res.decoded.length < 500) res.decoded.push({ where, kind, raw: s, text: dec });
+        scanString(res, dec, where, kind);
+      }
+    }
     if (s.indexOf('://') > 0) {
       URL_RE.lastIndex = 0;
       for (let m; (m = URL_RE.exec(s));) {
@@ -155,9 +207,9 @@ const Scan = (() => {
     }
   }
 
-  // info: result of Inspect.parseClass(bytes, true)
-  function scanClass(res, info) {
-    const where = info.name || '?';
+  // info: result of Inspect.parseClass(bytes, true). prefix: "inner.jar!" for nested archives.
+  function scanClass(res, info, prefix = '') {
+    const where = prefix + (info.name || '?');
     res.classCount++;
     for (const ref of info.refs) {
       const rules = refIndex.get(ref);
@@ -167,6 +219,28 @@ const Scan = (() => {
       for (const c of info.classes) for (const r of clsRules) for (const pre of r.cls) if (c.startsWith(pre)) hit(res, r, where, c.replace(/\//g, '.'));
     }
     for (const s of info.strings) scanString(res, s, where);
+  }
+
+  // A native binary bundled in an archive: record it and scan its strings.
+  function scanNative(res, where, strings) {
+    hit(res, NATIVE, where, `${strings.length} strings scanned`);
+    for (const st of strings) scanString(res, st.s, where);
+  }
+
+  // Short plain-text summary for pasting into Discord / chat. URLs are defanged.
+  function textSummary(name, sha256, sum, res) {
+    const defang = u => u.replace(/^http/i, 'hxxp').replace(/\./g, '[.]');
+    const icon = { high: '🔴', med: '🟠', low: '🟡', none: '🟢' }[sum.level];
+    const lines = [`**${name}** — ${icon} ${sum.label} (EZLARP static scan)`];
+    if (sha256) lines.push('sha256: `' + sha256 + '`');
+    for (const f of sum.findings.slice(0, 8)) {
+      const w = [...f.where.keys()].slice(0, 2).map(x => x.replace(/\//g, '.')).join(', ');
+      lines.push(`- [${f.rule.sev.toUpperCase()}] ${f.rule.title}${w ? ' — ' + w + (f.where.size > 2 ? ` +${f.where.size - 2}` : '') : ''}`);
+    }
+    const urls = [...res.urls.keys()].slice(0, 6);
+    if (urls.length) lines.push('urls: ' + urls.map(u => '`' + defang(u) + '`').join(' '));
+    lines.push('_heuristics only — a hit means "read this code", not proof of malware_');
+    return lines.join('\n');
   }
 
   // Name-based obfuscation heuristic over all class names.
@@ -188,13 +262,13 @@ const Scan = (() => {
     for (const f of findings) count[f.rule.sev]++;
     let level = 'none';
     if (count.high) level = 'high';
-    else if (count.med >= 2) level = 'med';
-    else if (count.med || count.low >= 3) level = 'low';
+    else if (count.med) level = 'med';
+    else if (count.low >= 3) level = 'low';
     const label = {
       high: 'high-risk indicators', med: 'review recommended', low: 'minor indicators', none: 'no known indicators'
     }[level];
     return { findings, count, level, label, rulesTotal: RULES.length, rulesHit: findings.length };
   }
 
-  return { RULES, newResult, scanClass, scanString, scanNames, summarize };
+  return { RULES, newResult, scanClass, scanString, scanNative, scanNames, summarize, textSummary, decodings };
 })();

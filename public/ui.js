@@ -13,14 +13,15 @@ const LANGS = {
   py: 'python', lua: 'lua', glsl: 'glsl', vsh: 'glsl', fsh: 'glsl', txt: 'plaintext'
 };
 const IMG_RE = /\.(png|jpe?g|gif|webp|bmp|ico)$/i;
-const ARCHIVE_RE = /\.(jar|apk|zip|war|ear|aar|xapk)$/i;
+const ARCHIVE_RE = /\.(jar|apk|zip|war|ear|aar|xapk|mrpack)$/i;
+const NATIVE_FILE_RE = /\.(dll|exe|so|dylib|jnilib|sys)$/i;
 const SEV_RANK = { high: 3, med: 2, low: 1, info: 0, none: 0 };
 
 const el = {};
 for (const id of ['drop', 'file', 'pick', 'engine', 'fallback', 'rename', 'status', 'ficon', 'verdict', 'fname', 'fsize', 'ftype',
   'fstate', 'fmd5', 'fsha1', 'fhash', 'vt', 'ftags', 'fill', 'err', 'result', 'rtabs', 'scandot', 'decall', 'retry', 'report', 'dl',
   'banner', 'q', 'qmode', 'tree', 'sidefoot', 'ftabs', 'cpath', 'cmeta', 'outline', 'openjar', 'bc', 'wrap', 'copy', 'dlone',
-  'codebox', 'gutter', 'code', 'preview', 'usages', 'recent', 'recentlist', 'clearhist', 'scan', 'details', 'sq', 'skind', 'scount', 'strings', 'logbox', 'overlay', 'console']) {
+  'codebox', 'gutter', 'code', 'preview', 'usages', 'urlform', 'url', 'cmp', 'cmpfile', 'cmpview', 'recent', 'recentlist', 'clearhist', 'scan', 'details', 'sq', 'skind', 'scount', 'strings', 'logbox', 'overlay', 'console']) {
   el[id] = $(id);
 }
 
@@ -140,6 +141,8 @@ function renderResult() {
   el.report.hidden = !!S.batch;
   el.dl.hidden = !hasFiles;
   el.decall.hidden = !(S.lazy && pendingCount() > 0);
+  el.cmp.hidden = !S.jarInfo || !S.jarInfo.classCount;
+  el.rtabs.querySelector('[data-view=compare]').hidden = !S.cmp;
   renderVerdict();
   renderBanner();
   renderDetails();
@@ -154,9 +157,10 @@ function renderResult() {
     } else {
       openFile(S.current);
     }
-    showView('source');
+    const onlyNested = S.jarInfo && !S.jarInfo.classCount && S.nestedRows && S.nestedRows.length;
+    showView(S.mrpack ? 'details' : onlyNested ? 'scan' : 'source');
   } else {
-    showView(S.batch || (S.scan && S.scan.level !== 'none') ? 'scan' : 'details');
+    showView(S.mrpack ? 'details' : S.batch || (S.scan && S.scan.level !== 'none') ? 'scan' : 'details');
   }
 }
 
@@ -167,8 +171,12 @@ function pickFirstFile() {
     const p = fileForClass(S.jarInfo.mainClass.trim().replace(/\./g, '/'));
     if (p) return p;
   }
-  return paths.find(p => S.files.get(p).type === 'src') || paths[0];
+  const isLib = p => LIB_PREFIX.some(pre => p.startsWith(pre));
+  if (S.apk && S.apk.pkg) { const own = S.apk.pkg.replace(/\./g, '/') + '/'; const p = paths.find(x => x.startsWith(own) && S.files.get(x).type === 'src'); if (p) return p; }
+  return paths.find(p => S.files.get(p).type !== 'res' && !isLib(p)) || paths.find(p => S.files.get(p).type !== 'res') || paths[0];
 }
+const LIB_PREFIX = ['android/', 'androidx/', 'kotlin/', 'kotlinx/', 'com/google/', 'org/apache/', 'org/slf4j/', 'okhttp3/', 'okio/', 'com/fasterxml/', 'io/netty/',
+  'org/jetbrains/', 'javax/', 'org/intellij/', 'com/squareup/', 'io/reactivex/', 'org/json/', 'net/kyori/', 'org/objectweb/', 'org/spongepowered/', '(pyinstaller)/'];
 
 function pendingCount() {
   let n = 0;
@@ -230,10 +238,11 @@ function renderBanner() {
 
 // ------------------------------------------------------------------ tree
 
+const TYPE_RANK = { src: 0, py: 0, res: 1 };
 function sortedPaths() {
-  return [...S.files.keys()].sort((a, b) => {
-    const ta = S.files.get(a).type, tb = S.files.get(b).type;
-    if (ta !== tb) return ta === 'src' ? -1 : 1;
+  return [...S.files.keys()].filter(k => !S.files.get(k).virtual).sort((a, b) => {
+    const ra = TYPE_RANK[S.files.get(a).type] || 0, rb = TYPE_RANK[S.files.get(b).type] || 0;
+    if (ra !== rb) return ra - rb;
     return a.localeCompare(b);
   });
 }
@@ -259,9 +268,12 @@ function countFiles(node) {
 
 function updateFoot() {
   const files = [...S.files.values()];
-  const srcCount = files.filter(f => f.type === 'src').length;
-  const done = files.filter(f => f.type === 'src' && f.text != null).length;
-  el.sidefoot.textContent = `${srcCount} sources${S.lazy ? ` (${done} decompiled)` : ''} · ${S.files.size - srcCount} resources`;
+  const real = files.filter(f => !f.virtual);
+  const py = real.filter(f => f.type === 'py').length;
+  const srcCount = real.filter(f => f.type === 'src').length;
+  const done = real.filter(f => f.type === 'src' && f.text != null).length;
+  el.sidefoot.textContent = py ? `${py} Python modules · ${real.length - py} other` :
+    `${srcCount} sources${S.lazy ? ` (${done} decompiled)` : ''} · ${real.length - srcCount} resources`;
 }
 
 function renderTree() {
@@ -320,8 +332,8 @@ function fileRow(path, label, depth, html) {
     (flag === 'high' ? ' flag' : flag === 'med' ? ' flag-med' : '');
   row.dataset.path = path;
   row.style.paddingLeft = (8 + depth * 14) + 'px';
-  const icon = f.type === 'src' ? 'J' : ARCHIVE_RE.test(path) ? '⧉' : IMG_RE.test(path) ? '▣' : '·';
-  const color = f.type === 'src' ? 'var(--accent2)' : ARCHIVE_RE.test(path) ? 'var(--warn)' : 'var(--dim)';
+  const icon = f.type === 'src' ? 'J' : f.type === 'py' ? 'P' : ARCHIVE_RE.test(path) ? '⧉' : NATIVE_FILE_RE.test(path) ? '⚙' : IMG_RE.test(path) ? '▣' : '·';
+  const color = f.type === 'src' || f.type === 'py' ? 'var(--accent2)' : ARCHIVE_RE.test(path) || NATIVE_FILE_RE.test(path) ? 'var(--warn)' : 'var(--dim)';
   const star = f.entry ? '<span class="star" title="entrypoint">★</span>' : '';
   row.innerHTML = `<span class="ic" style="color:${color}">${icon}</span><span class="nm">${html || esc(label)}</span>${star}`;
   row.title = path + (f.type === 'src' && f.text == null ? ' (not decompiled yet)' : '');
@@ -532,8 +544,10 @@ async function openFile(path, opts = {}) {
   renderTabs();
   markTree();
   el.cpath.textContent = path;
-  el.openjar.hidden = !(f.type === 'res' && ARCHIVE_RE.test(path));
+  el.openjar.hidden = !(f.type === 'res' && (ARCHIVE_RE.test(path) || /\.(exe|dll|class|dex)$/i.test(path)));
+  el.openjar.textContent = ARCHIVE_RE.test(path) ? 'open this archive' : 'analyze this file';
   el.bc.hidden = f.type !== 'src' || !S.jarInfo;
+  el.dlone.textContent = f.type === 'py' ? 'download .pyc' : 'download';
   el.usages.hidden = f.type !== 'src' || !S.xrefs.size;
   el.bc.textContent = f.view === 'bc' ? 'source' : 'bytecode';
   el.outline.hidden = true;
@@ -542,6 +556,17 @@ async function openFile(path, opts = {}) {
   el.gutter.hidden = false;
 
   let text, lang = '';
+  if (f.type === 'py' || f.type === 'diff') {
+    text = f.text;
+    lang = f.type === 'py' ? 'python' : 'diff';
+    el.cmeta.textContent = f.type === 'py'
+      ? `compiled Python ${S.py ? S.py.pyver : ''} · ${f.summary ? `${f.summary.outline.length} defs · ${f.summary.strings.length} strings` : ''}`
+      : f.meta || 'diff';
+    if (f.type === 'py') renderOutline(text, /^(\s*)((?:def|class) [\w.<>]+)/);
+    renderCode(text, lang);
+    if (opts.line) scrollToLine(opts.line); else if (opts.find) scrollToFind(text, opts.find); else el.codebox.scrollTop = 0;
+    return;
+  }
   if (f.type === 'src') {
     if (f.view === 'bc') {
       if (f.bytecode == null) {
@@ -602,6 +627,16 @@ async function openFile(path, opts = {}) {
   else el.codebox.scrollTop = 0;
 }
 
+function clearViewer() {
+  el.code.textContent = '';
+  el.gutter.textContent = '';
+  el.ftabs.innerHTML = '';
+  el.cpath.textContent = '—';
+  el.cmeta.textContent = '';
+  el.outline.hidden = true;
+  el.preview.hidden = true;
+}
+
 function showPlaceholder(text) {
   el.codebox.classList.add('loading');
   el.cmeta.textContent = 'working…';
@@ -629,6 +664,13 @@ function renderCode(text, lang, placeholder) {
   let g = '';
   for (let i = 1; i <= n; i++) g += i + '\n';
   el.gutter.textContent = g;
+  if (lang === 'diff') {
+    el.code.innerHTML = text.split('\n').map(l => {
+      const c = l.startsWith('+++') || l.startsWith('---') ? 'hljs-meta' : l[0] === '+' ? 'hljs-addition' : l[0] === '-' ? 'hljs-deletion' : l.startsWith('@@') ? 'hljs-meta' : '';
+      return c ? `<span class="${c}">${esc(l)}</span>` : esc(l);
+    }).join('\n');
+    return;
+  }
   if (window.hljs && lang && lang !== 'plaintext' && hljs.getLanguage(lang) && text.length <= MAX_HIGHLIGHT) {
     try {
       el.code.innerHTML = hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
@@ -642,11 +684,12 @@ const OUTLINE_TYPE = /^(\s*)(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|protected|pri
 const OUTLINE_METHOD = /^(\s+)(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:<[^>]+>\s+)?([\w$.]+(?:<[^()]*>)?(?:\[\])*\s+)?([\w$]+)\s*\(([^)]*)\)?\s*(?:throws [\w$., ]+)?\s*[{;]?\s*$/;
 const NOT_METHOD = new Set(['if', 'for', 'while', 'switch', 'catch', 'synchronized', 'return', 'new', 'else', 'try', 'do', 'throw', 'case']);
 
-function renderOutline(text) {
+function renderOutline(text, simpleRe) {
   const lines = text.split('\n');
   const items = [];
   for (let i = 0; i < lines.length && items.length < 600; i++) {
     const L = lines[i];
+    if (simpleRe) { const m = simpleRe.exec(L); if (m) items.push({ line: i + 1, label: '  '.repeat(Math.min(6, m[1].length / 4)) + m[2] }); continue; }
     let m = OUTLINE_TYPE.exec(L);
     if (m) { items.push({ line: i + 1, label: '  '.repeat(Math.min(4, m[1].length / 4)) + m[2] + ' ' + m[3] }); continue; }
     m = OUTLINE_METHOD.exec(L);
@@ -706,6 +749,20 @@ function hexDump(u8) {
     out += i.toString(16).padStart(8, '0') + '  ' + h + '  ' + a + '\n';
   }
   return out;
+}
+
+// A scan location: "pkg/Class", "python.module", "lib/x.dll", or "inner.jar!pkg/Class"
+async function openLocation(where, find) {
+  if (fileForClass(where)) return openClass(where, find);
+  const bang = where.indexOf('!');
+  if (bang > 0 && S.files.has(where.slice(0, bang))) {
+    await openNested(where.slice(0, bang));
+    const rest = where.slice(bang + 1);
+    if (S.name === baseOf(where.slice(0, bang))) openLocation(rest, find);
+    return;
+  }
+  if (S.files.has(where)) { showView('source'); openFile(where); return; }
+  if (/^0x[0-9a-f]+$/.test(where) && S.strings) { showView('strings'); el.sq.value = (find || '').slice(0, 40); renderStrings(); }
 }
 
 // open the source file of a class, optionally scrolling to some text inside it
@@ -812,6 +869,8 @@ el.copy.onclick = () => {
 el.dlone.onclick = async () => {
   const f = S.files.get(S.current);
   if (!f) return;
+  if (f.type === 'py') { download(baseOf(f.path).replace(/\.py$/, '.pyc'), await pycBytes(f)); return; }
+  if (f.type === 'diff') { download(baseOf(f.path) + '.diff', f.text, 'text/plain'); return; }
   if (f.type === 'src') {
     if (f.view === 'bc') download(baseOf(f.path).replace(/\.java$/, '.bytecode.txt'), f.bytecode || '', 'text/plain');
     else download(baseOf(f.path), f.text || '', 'text/plain');
@@ -860,6 +919,7 @@ function renderScan() {
   if (!S.scan) { el.scan.innerHTML = '<div class="empty">nothing scanned</div>'; return; }
   const sc = S.scan, r = S.scanRes;
   let h = `<section><div class="scan-sum">
+    <button class="btn ghost sm" id="copysum" title="Copy a short summary (URLs defanged) for Discord or a bug report" style="margin-left:auto;order:9">copy summary</button>
     <div class="pill high"><b>${sc.count.high}</b>high</div>
     <div class="pill med"><b>${sc.count.med}</b>medium</div>
     <div class="pill low"><b>${sc.count.low}</b>low</div>
@@ -875,7 +935,7 @@ function renderScan() {
       const locs = [...fd.where.entries()].slice(0, 60);
       h += `<details class="finding ${rule.sev}"${rule.sev === 'high' ? ' open' : ''}><summary><span class="sev">${rule.sev.toUpperCase()}</span><span>${esc(rule.title)}</span><span class="cnt">${plural(fd.where.size, 'place')}</span></summary><div class="body"><div class="why">${esc(rule.why)}</div>`;
       for (const [where, evs] of locs) {
-        const clickable = r.classCount && fileForClass(where);
+        const clickable = fileForClass(where) || where.includes('!') || (S.files.has(where) && S.files.get(where).type === 'res');
         h += `<div class="loc">${clickable ? `<a data-cls="${esc(where)}" data-find="${esc([...evs][0] || '')}">${esc(dots(where))}</a>` : esc(where)}</div>`;
         for (const ev of evs) h += `<div class="ev">${esc(ev)}</div>`;
       }
@@ -885,6 +945,21 @@ function renderScan() {
     h += '</section>';
   } else {
     h += section('INDICATORS', `<div class="note">None of the ${sc.rulesTotal} indicator rules matched.</div>`);
+  }
+
+  if (S.nestedRows && S.nestedRows.length) {
+    const rows = S.nestedRows.slice().sort((a, b) => (SEV_RANK[b.level] || 0) - (SEV_RANK[a.level] || 0));
+    const lbl = { high: 'HIGH', med: 'REVIEW', low: 'MINOR', none: 'CLEAN' };
+    h += section(`INSIDE THIS ARCHIVE · ${rows.length}`, '<table class="batch"><tr><th>result</th><th>file</th><th>what</th><th>top indicators</th></tr>' + rows.map(x => {
+      const top = x.summary ? x.summary.findings.filter(f => f.rule.sev !== 'low').slice(0, 3).map(f => esc(f.rule.title)).join('<br>') : '';
+      const what = x.kind === 'native' ? 'native binary (strings scanned)' : [x.meta && x.meta.name ? esc(x.meta.name) + (x.meta.version ? ' ' + esc(x.meta.version) : '') : '', plural(x.classes, 'class')].filter(Boolean).join('<br>');
+      return `<tr class="brow" data-open="${esc(x.name)}"><td>${x.level ? `<span class="lvl ${x.level}">${lbl[x.level]}</span>` : '<span class="lvl">NATIVE</span>'}</td><td><div class="fn">${esc(x.name)}</div><div class="sub">${human(x.size)}</div></td><td class="sub">${what}</td><td class="hits">${top || '<span class="sub">—</span>'}</td></tr>`;
+    }).join('') + '</table>');
+  }
+
+  if (r.decoded && r.decoded.length) {
+    h += section(`DECODED HIDDEN STRINGS · ${r.decoded.length}`, '<div class="ioc">' + r.decoded.slice(0, 200).map(d =>
+      `<div><span class="u"><span style="color:var(--dim)">${esc(d.kind)}:</span> ${esc(d.text.length > 300 ? d.text.slice(0, 300) + '…' : d.text)}</span><span class="w" data-cls="${esc(d.where)}" data-find="${esc(d.raw.slice(0, 40))}" title="${esc(d.raw)}">${esc(dots(d.where))}</span></div>`).join('') + '</div>');
   }
 
   if (r.obf) {
@@ -900,9 +975,10 @@ function renderScan() {
 
   h += `<div class="disclaimer">Static heuristics over string constants and API references. A hit means "read this code", not "this is malware", and a clean result doesn't prove a file is safe. Hashes can be checked on VirusTotal from the link at the top (only the hash leaves your browser, and only when you click it).</div>`;
   el.scan.innerHTML = h;
-  for (const a of el.scan.querySelectorAll('[data-cls]')) {
-    a.onclick = () => { if (S.scanRes.classCount) openClass(a.dataset.cls, a.dataset.find); };
-  }
+  for (const a of el.scan.querySelectorAll('[data-cls]')) a.onclick = () => openLocation(a.dataset.cls, a.dataset.find);
+  for (const tr of el.scan.querySelectorAll('tr[data-open]')) tr.onclick = () => openNested(tr.dataset.open);
+  const cs = el.scan.querySelector('#copysum');
+  if (cs) cs.onclick = () => copyText(Scan.textSummary(S.name, S.hashes.sha256, S.scan, S.scanRes), cs);
 }
 
 // ------------------------------------------------------------------ details
@@ -914,6 +990,15 @@ function renderDetails() {
   if (S.apk) h += apkDetails();
   if (S.dex) h += section('DEX FILE', kv([['format version', S.dex.version], ['classes', S.dex.classes], ['methods', S.dex.methods], ['strings', S.dex.strings]]));
   if (S.cls) h += section('CLASS FILE', kv([['class', esc(dots(S.cls.name || '?'))], ['bytecode', esc(Inspect.javaVersion(S.cls.major)) + ` (major ${S.cls.major}, minor ${S.cls.minor})`], ['superclass', S.cls.superName ? esc(dots(S.cls.superName)) : null]]));
+  if (S.mrpack) {
+    const m = S.mrpack;
+    h += section('MODRINTH MODPACK', kv([
+      ['name', m.name ? esc(m.name) : null], ['version', m.version ? esc(m.version) : null], ['summary', m.summary ? esc(m.summary) : null],
+      ['requires', Object.entries(m.deps).map(([k, v]) => esc(k + ' ' + v)).join(', ') || null],
+      ['files', `${m.files.length} · ${human(m.files.reduce((a, f) => a + (f.fileSize || 0), 0))}`],
+    ]) + `<button class="btn" id="mrscan" style="margin:10px 0">download &amp; scan all ${m.files.length} files</button>` +
+      '<div class="ioc">' + m.files.map(f => `<div><span class="u">${esc(f.path)}</span><span class="w">${human(f.fileSize || 0)}</span></div>`).join('') + '</div>');
+  }
   if (S.jarInfo) h += jarDetails();
   if (S.batch) h += section('BATCH', kv([['files', S.batch.length], ['total size', human(S.batch.reduce((a, r) => a + r.size, 0))], ['classes scanned', S.batch.reduce((a, r) => a + (r.classes || 0), 0)]]));
   h += section('KEYBOARD', `<div class="help">
@@ -929,6 +1014,8 @@ function renderDetails() {
   for (const a of el.details.querySelectorAll('[data-cls]')) a.onclick = () => openClass(a.dataset.cls);
   for (const a of el.details.querySelectorAll('[data-open]')) a.onclick = () => openNested(a.dataset.open);
   for (const a of el.details.querySelectorAll('[data-py]')) a.onclick = () => extractPy(+a.dataset.py);
+  const ms = el.details.querySelector('#mrscan');
+  if (ms) ms.onclick = () => scanMrpack();
   const sn = el.details.querySelector('#scannested');
   if (sn) sn.onclick = () => scanNested();
 }

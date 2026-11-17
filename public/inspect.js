@@ -378,6 +378,123 @@ const Inspect = (() => {
     }
   }
 
+  // ------------------------------------------------------------ Python marshal / PYZ
+
+  // Minimal reader for CPython's marshal format (enough for code objects of 3.7–3.14).
+  // Returns plain JS values; code objects become { $code: true, name, qualname, filename, consts, names, varnames, firstlineno }.
+  function unmarshal(u8, ver, start = 0) {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const [maj, min] = ver.split('.').map(Number);
+    const v = maj * 100 + min;
+    const refs = [];
+    let p = start, depth = 0;
+    const i32 = () => { const x = dv.getInt32(p, true); p += 4; return x; };
+    const u8at = () => u8[p++];
+    const str = (n, enc) => { const s = enc === 'latin1' ? latin(u8, p, p + n) : new TextDecoder(enc === 'ascii' ? 'latin1' : 'utf-8', { fatal: false }).decode(u8.subarray(p, p + n)); p += n; return s; };
+    const read = () => {
+      if (p >= u8.length) throw new Error('marshal: unexpected end');
+      if (++depth > 400) throw new Error('marshal: too deep');
+      const code = u8at();
+      const flag = code & 0x80, t = String.fromCharCode(code & 0x7f);
+      let idx = -1;
+      if (flag) { idx = refs.length; refs.push(null); }
+      let val;
+      switch (t) {
+        case '0': val = undefined; break;
+        case 'N': val = null; break;
+        case 'F': val = false; break;
+        case 'T': val = true; break;
+        case 'S': val = 'StopIteration'; break;
+        case '.': val = '...'; break;
+        case 'i': val = i32(); break;
+        case 'l': { const n = i32(); let x = 0n; const k = Math.abs(n); for (let j = 0; j < k; j++) { x += BigInt(dv.getUint16(p, true)) << BigInt(15 * j); p += 2; } val = n < 0 ? -x : x; break; }
+        case 'g': val = dv.getFloat64(p, true); p += 8; break;
+        case 'y': val = [dv.getFloat64(p, true), dv.getFloat64(p + 8, true)]; p += 16; break;
+        case 'f': case 'x': { const n = u8at(); val = +str(n, 'ascii'); break; }
+        case 's': { const n = i32(); val = { $bytes: u8.subarray(p, p + n) }; p += n; break; }
+        case 't': case 'u': { const n = i32(); val = str(n, 'utf-8'); break; }
+        case 'a': case 'A': { const n = i32(); val = str(n, 'ascii'); break; }
+        case 'z': case 'Z': { const n = u8at(); val = str(n, 'ascii'); break; }
+        case '(': case '[': case '<': case '>': { const n = i32(); val = []; if (flag) refs[idx] = val; for (let j = 0; j < n; j++) val.push(read()); break; }
+        case ')': { const n = u8at(); val = []; if (flag) refs[idx] = val; for (let j = 0; j < n; j++) val.push(read()); break; }
+        case '{': { val = new Map(); if (flag) refs[idx] = val; for (;;) { const k = read(); if (k === undefined) break; val.set(k, read()); } break; }
+        case 'r': { const n = i32(); val = refs[n]; break; }
+        case 'c': {
+          const c = { $code: true };
+          if (flag) refs[idx] = c;
+          c.argcount = i32();
+          if (v >= 308) c.posonly = i32();
+          c.kwonly = i32();
+          if (v < 311) c.nlocals = i32();
+          c.stacksize = i32(); c.flags = i32();
+          read(); // bytecode
+          c.consts = read(); c.names = read();
+          if (v >= 311) { c.varnames = read(); read(); } // localsplusnames, localspluskinds
+          else { c.varnames = read(); read(); read(); } // varnames, freevars, cellvars
+          c.filename = read(); c.name = read();
+          if (v >= 311) c.qualname = read();
+          c.firstlineno = i32();
+          read(); // lnotab / linetable
+          if (v >= 311) read(); // exceptiontable
+          val = c;
+          break;
+        }
+        default: throw new Error(`marshal: unknown type '${t}' (0x${code.toString(16)}) at ${p - 1}`);
+      }
+      if (flag && t !== '(' && t !== '[' && t !== '<' && t !== '>' && t !== ')' && t !== '{' && t !== 'c') refs[idx] = val;
+      depth--;
+      return val;
+    };
+    const value = read();
+    return { value, end: p };
+  }
+
+  // Walks a code object: collects string constants, names, and a function/class outline.
+  function pyCodeSummary(code) {
+    const strings = new Set(), names = new Set(), outline = [];
+    const walk = (c, depth) => {
+      if (!c || !c.$code || depth > 60) return;
+      if (depth > 0) {
+        const nm = c.names || [];
+        const isClass = nm.includes('__module__') && nm.includes('__qualname__') && !c.argcount;
+        outline.push({ depth, name: c.qualname || c.name, line: c.firstlineno, args: c.argcount, isClass });
+      }
+      for (const n of c.names || []) if (typeof n === 'string') names.add(n);
+      const visit = x => {
+        if (typeof x === 'string') { if (x.length >= 2) strings.add(x); }
+        else if (x && x.$bytes) { if (x.$bytes.length >= 4 && x.$bytes.length < 4096) { let s = ''; let ok = true; for (const b of x.$bytes) { if (b < 9 || (b > 13 && b < 32) || b > 126) { ok = false; break; } s += String.fromCharCode(b); } if (ok) strings.add(s); } }
+        else if (Array.isArray(x)) x.forEach(visit);
+        else if (x && x.$code) walk(x, depth + 1);
+      };
+      (c.consts || []).forEach(visit);
+    };
+    walk(code, 0);
+    return { strings: [...strings], names: [...names], outline };
+  }
+
+  // PYZ archive (PyInstaller's zipped module store). Returns { magic, entries: [{name, pkg, off, len}] } or null.
+  function parsePYZ(u8, ver) {
+    if (u8.length < 12 || u8[0] !== 0x50 || u8[1] !== 0x59 || u8[2] !== 0x5A || u8[3] !== 0) return null;
+    const magic = u8.slice(4, 8);
+    const tocOff = new DataView(u8.buffer, u8.byteOffset, u8.byteLength).getUint32(8);
+    const toc = unmarshal(u8, ver, tocOff).value;
+    const list = toc instanceof Map ? [...toc.entries()] : toc;
+    const entries = [];
+    for (const item of list || []) {
+      const name = item[0], meta = item[1];
+      if (typeof name !== 'string' || !Array.isArray(meta)) continue;
+      entries.push({ name, pkg: meta[0] === 1 || meta[0] === true, off: Number(meta[1]), len: Number(meta[2]) });
+    }
+    return { magic, entries };
+  }
+
+  // 16-byte .pyc header (PEP 552 layout, 3.7+): magic, flags=0, mtime=0, size=0
+  function pycHeader(magic) {
+    const h = new Uint8Array(16);
+    h.set(magic.subarray ? magic.subarray(0, 4) : magic, 0);
+    return h;
+  }
+
   // ------------------------------------------------------------ Android
 
   function dexInfo(u8) {
@@ -655,5 +772,5 @@ const Inspect = (() => {
     return '';
   }
 
-  return { sniff, parseClass, javaVersion, parsePE, parsePyInstaller, dexInfo, decodeAXML, md5, detectSignatures, findEmbeddedZip, extractStrings, classifyString, MACHINES, SUBSYSTEMS };
+  return { sniff, parseClass, javaVersion, parsePE, parsePyInstaller, unmarshal, pyCodeSummary, parsePYZ, pycHeader, dexInfo, decodeAXML, md5, detectSignatures, findEmbeddedZip, extractStrings, classifyString, MACHINES, SUBSYSTEMS };
 })();

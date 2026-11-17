@@ -38,7 +38,92 @@ async function loadSample(name) {
   } catch (e) { showError('could not load sample: ' + (e.message || e)); }
 }
 const hashSample = (/[#&]sample=([\w.-]+)/.exec(location.hash) || [])[1];
-if (hashSample) window.addEventListener('load', () => loadSample(hashSample));
+const hashUrl = (/[#&]url=([^&]+)/.exec(location.hash) || [])[1];
+window.addEventListener('load', () => {
+  if (hashSample) loadSample(hashSample);
+  else if (hashUrl) { el.url.value = decodeURIComponent(hashUrl); loadUrl(el.url.value); }
+});
+
+// ------------------------------------------------------------------ open from a link
+
+el.urlform.onsubmit = e => { e.preventDefault(); if (el.url.value.trim()) loadUrl(el.url.value); };
+
+const MODRINTH_RE = /modrinth\.com\/(mod|plugin|datapack|resourcepack|shader|modpack)\/([\w.-]+)(?:\/version\/([^/?#]+))?/i;
+
+async function resolveLink(raw) {
+  let url = raw.trim();
+  if (url.startsWith('/')) url = location.origin + url;
+  else if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+  const mr = MODRINTH_RE.exec(url);
+  if (mr) {
+    setState('looking up the Modrinth project', 2);
+    const r = await fetch(`https://api.modrinth.com/v2/project/${encodeURIComponent(mr[2])}/version`);
+    if (!r.ok) throw new Error(r.status === 404 ? `Modrinth project "${mr[2]}" not found` : `Modrinth API answered HTTP ${r.status}`);
+    const versions = await r.json();
+    if (!versions.length) throw new Error('this Modrinth project has no files');
+    const v = mr[3] ? versions.find(x => x.id === mr[3] || x.version_number === decodeURIComponent(mr[3])) : versions[0];
+    if (!v) throw new Error(`version "${mr[3]}" not found on Modrinth`);
+    const file = v.files.find(f => f.primary) || v.files[0];
+    return { url: file.url, name: file.filename, source: `Modrinth · ${mr[2]} ${v.version_number}`, sha1: file.hashes && file.hashes.sha1 };
+  }
+  // GitHub file pages -> raw (raw.githubusercontent.com allows cross-site downloads)
+  const gh = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/(?:blob|raw)\/(.+)$/i.exec(url);
+  if (gh) url = `https://raw.githubusercontent.com/${gh[1]}/${gh[2]}`;
+  const name = decodeURIComponent((new URL(url).pathname.split('/').pop() || 'download').replace(/\?.*$/, '')) || 'download';
+  return { url, name, source: new URL(url).hostname };
+}
+
+async function fetchBytes(url, label, onProgress) {
+  let r;
+  try {
+    r = await fetch(url);
+  } catch (e) {
+    throw new Error(`Couldn't download that link from the browser. The site doesn't allow downloads from other websites (CORS). GitHub release files, CurseForge and Google Drive work like this.\nDownload the file yourself and drop it here instead. Modrinth links, raw GitHub files and jsDelivr links do work.`);
+  }
+  if (!r.ok) throw new Error(`download failed: HTTP ${r.status}`);
+  const total = +r.headers.get('content-length') || 0;
+  if (!r.body || !r.body.getReader) return new Uint8Array(await r.arrayBuffer());
+  const reader = r.body.getReader();
+  const chunks = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    got += value.length;
+    if (onProgress) onProgress(got, total);
+  }
+  const out = new Uint8Array(got);
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+}
+
+async function sha1hex(u8) {
+  return [...new Uint8Array(await crypto.subtle.digest('SHA-1', u8))].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function loadUrl(raw) {
+  if (busy) { toast('busy — wait for the current file to finish'); return; }
+  el.status.hidden = false;
+  el.err.hidden = true;
+  el.recent.hidden = true;
+  setBusy(true);
+  try {
+    const link = await resolveLink(raw);
+    el.fname.textContent = link.name;
+    const u8 = await fetchBytes(link.url, link.name, (got, total) =>
+      setState(`downloading ${human(got)}${total ? ' / ' + human(total) : ''}`, total ? 2 + 4 * got / total : null));
+    if (link.sha1 && await sha1hex(u8) !== link.sha1) throw new Error('downloaded file does not match the hash Modrinth published for it');
+    setBusy(false);
+    stack.length = 0;
+    await analyze(link.name, u8, { source: link.source });
+  } catch (e) {
+    setBusy(false);
+    setState('error', 100);
+    showError(e.message || String(e));
+  }
+}
 
 let dragDepth = 0;
 const hasFiles = e => e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files');
@@ -97,6 +182,7 @@ async function analyze(name, u8, opts = {}) {
   setQMode('files', false);
   el.drop.classList.add('compact');
   el.recent.hidden = true;
+  clearViewer();
   el.fname.textContent = name;
   el.fname.title = name;
   el.fsize.textContent = human(u8.length);
@@ -104,6 +190,7 @@ async function analyze(name, u8, opts = {}) {
   for (const k of ['fmd5', 'fsha1', 'fhash']) el[k].textContent = '…';
   setState('reading', 3);
   hashes(u8, !!opts.multiClass);
+  if (opts.source) { S.source = opts.source; tag('from ' + opts.source, 'java'); }
 
   try {
     let kind = Inspect.sniff(u8, name);
@@ -116,6 +203,11 @@ async function analyze(name, u8, opts = {}) {
       if (zip.file('AndroidManifest.xml') || zip.file(/^classes\d*\.dex$/).length) {
         S.kind = 'apk';
         await analyzeApk(zip);
+      } else if (zip.file('modrinth.index.json')) {
+        S.kind = 'mrpack';
+        await analyzeMrpack(zip);
+        S.jarBytes = u8;
+        S.preZip = zip;
       } else {
         S.kind = 'jar';
         el.ftype.textContent = /\.aar$/i.test(name) ? 'Android library (aar)' : /\.xapk$/i.test(name) ? 'XAPK bundle' : 'Java archive';
@@ -348,6 +440,7 @@ function buildFiles() {
   }
   if (j.meta && j.meta.entrypoints) for (const e of j.meta.entrypoints) S.entrypoints.add(e.replace(/::.*$/, '').replace(/\./g, '/'));
   if (j.mainClass) S.entrypoints.add(j.mainClass.trim().replace(/\./g, '/'));
+  if (S.apk && S.apk.entry) for (const e of S.apk.entry) S.entrypoints.add(e.replace(/\./g, '/'));
 }
 
 async function scanJar() {
@@ -382,8 +475,53 @@ async function scanJar() {
   }
   Scan.scanNames(res, names);
   if (S.apk) for (const p of S.apk.perms) if (DANGEROUS_PERMS.test(p)) Scan.scanString(res, p, 'AndroidManifest.xml');
+  await scanInside(res, j.rz, '', 0);
   setScan(res);
   for (const ep of S.entrypoints) { const p = fileForClass(ep); if (p) S.files.get(p).entry = true; }
+}
+
+const NATIVE_RE = /\.(dll|so|dylib|exe|jnilib|sys)$/i;
+const NESTED_MAX = 64 * 1024 * 1024;
+
+// Scan archives and native binaries inside an archive (jar-in-jar is a common hiding place).
+// Findings are located as "inner.jar!pkg/Class" or "lib/x.dll".
+async function scanInside(res, zip, prefix, depth) {
+  const entries = Object.values(zip.files).filter(f => !f.dir && (ARCHIVE_RE.test(f.name) || NATIVE_RE.test(f.name)));
+  if (!entries.length) return;
+  if (!depth) S.nestedRows = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    const size = (e._data && e._data.uncompressedSize) || 0;
+    const where = prefix + e.name;
+    if (size > NESTED_MAX) { S.log.push(`skipped ${where}: ${human(size)} is too big to scan inside`); continue; }
+    if (!depth) setState(`scanning inside ${e.name} (${i + 1}/${entries.length})`, 20);
+    await new Promise(r => setTimeout(r, 0));
+    const u8 = await e.async('uint8array');
+    if (NATIVE_RE.test(e.name)) {
+      Scan.scanNative(res, where, Inspect.extractStrings(u8, 6, 20000));
+      if (!depth) S.nestedRows.push({ name: e.name, size, kind: 'native', level: null });
+      continue;
+    }
+    let inner;
+    try { inner = await JSZip.loadAsync(u8); } catch (err) { S.log.push(`could not open ${where}: ${err.message}`); continue; }
+    const sub = Scan.newResult();
+    let classes = 0;
+    for (const f of Object.values(inner.files)) {
+      if (f.dir || !/\.class$/i.test(f.name)) continue;
+      const info = Inspect.parseClass(await f.async('uint8array'), true);
+      if (!info) continue;
+      classes++;
+      Scan.scanClass(res, info, where + '!');
+      Scan.scanClass(sub, info);
+    }
+    if (depth < 2) await scanInside(res, inner, where + '!', depth + 1);
+    if (!depth) {
+      let meta = null;
+      try { meta = await modMeta(async n => { const f = inner.file(n); return f ? f.async('string') : ''; }, n => !!inner.file(n)); } catch (err) { /* ignore */ }
+      const sum = Scan.summarize(sub);
+      S.nestedRows.push({ name: e.name, size, kind: 'archive', classes, meta, level: sum.level, summary: sum });
+    }
+  }
 }
 
 function setScan(res) {
@@ -393,7 +531,7 @@ function setScan(res) {
   for (const f of S.scan.findings) {
     if (f.rule.sev !== 'high' && f.rule.sev !== 'med') continue;
     for (const where of f.where.keys()) {
-      const p = fileForClass(where);
+      const p = fileForClass(where) || (where.includes('!') && S.files.has(where.split('!')[0]) ? where.split('!')[0] : null) || (S.files.has(where) ? where : null);
       if (p && SEV_RANK[f.rule.sev] > SEV_RANK[S.srcFlags.get(p) || 'none']) S.srcFlags.set(p, f.rule.sev);
     }
   }
@@ -407,12 +545,16 @@ function addJarTags() {
     else if (c.med) tag(plural(c.med, 'indicator') + ' to review', 'warn');
     else tag('no high-risk indicators', 'good');
   }
-  tag(plural(j.classCount, 'class'), 'java');
+  const nestedClasses = (S.nestedRows || []).reduce((a, r) => a + (r.classes || 0), 0);
+  if (j.classCount || !nestedClasses) tag(plural(j.classCount, 'class'), 'java');
+  if (nestedClasses) tag(plural(nestedClasses, 'class') + ' in nested jars', 'java');
   const top = Object.entries(j.versions).sort((a, b) => b[1] - a[1])[0];
   if (top) tag('target ' + Inspect.javaVersion(+top[0]), 'java');
   j.kinds.forEach(k => tag(k, 'good'));
   if (j.mainClass) tag('runnable', 'good');
-  if (j.nestedList.length) tag(plural(j.nestedList.length, 'nested archive'), 'warn');
+  if (j.nestedList.length) tag(plural(j.nestedList.length, 'nested archive') + ' (scanned)', 'warn');
+  const natives = j.resources.filter(r => NATIVE_RE.test(r.name)).length;
+  if (natives) tag(plural(natives, 'native binary') + ' inside', 'warn');
   if (S.scanRes && S.scanRes.obf) tag('likely obfuscated', 'warn');
   if (j.signed) tag('signed');
 }
@@ -438,6 +580,15 @@ async function analyzeApk(zip) {
       a.debuggable = attr('application', 'debuggable') === 'true';
       a.perms = [...new Set([...xml.matchAll(/<uses-permission(?:-sdk-23)?\b[^>]*?android:name="([^"]+)"/g)].map(m => m[1]))];
       for (const t of ['activity', 'service', 'receiver', 'provider']) a[t === 'activity' ? 'activities' : t + 's'] = (xml.match(new RegExp('<' + t + '\\b', 'g')) || []).length;
+      const full = n => !n ? null : n.startsWith('.') ? (a.pkg || '') + n : n.includes('.') ? n : (a.pkg ? a.pkg + '.' + n : n);
+      a.entry = [];
+      for (const m of xml.matchAll(/<(activity(?:-alias)?)\b([^>]*)>([\s\S]*?)<\/\1>/g)) {
+        if (!/android\.intent\.category\.LAUNCHER/.test(m[3])) continue;
+        const nm = (/\btargetActivity="([^"]+)"/.exec(m[2]) || /\bname="([^"]+)"/.exec(m[2]) || [])[1];
+        if (nm) { a.launcher = full(nm); a.entry.push(a.launcher); }
+      }
+      const appName = (/<application\b[^>]*?\sandroid:name="([^"]+)"/.exec(xml) || [])[1];
+      if (appName) { a.appClass = full(appName); a.entry.push(a.appClass); }
     } catch (e) {
       S.log.push('could not decode AndroidManifest.xml: ' + e.message);
     }
@@ -462,6 +613,31 @@ async function analyzeApk(zip) {
   if (a.debuggable) tag('debuggable', 'warn');
   if (items.length) S.jarBytes = await dex2jar(items);
   else S.log.push('no classes*.dex found — nothing to decompile');
+}
+
+// ------------------------------------------------------------------ modrinth modpacks
+
+async function analyzeMrpack(zip) {
+  const idx = JSON.parse(await zip.file('modrinth.index.json').async('string'));
+  el.ftype.textContent = 'Modrinth modpack';
+  const files = (idx.files || []).filter(f => f.downloads && f.downloads.length);
+  S.mrpack = { name: idx.name, version: idx.versionId, summary: idx.summary, deps: idx.dependencies || {}, files };
+  tag(`${idx.name || 'modpack'} ${idx.versionId || ''}`.trim(), 'java');
+  tag(plural(files.length, 'file') + ' to download', 'good');
+  S.log.push(`modpack lists ${files.length} files to download. Use "download & scan all" in DETAILS.`);
+}
+
+async function scanMrpack() {
+  if (busy || !S.mrpack) return;
+  const items = S.mrpack.files.map(f => ({
+    name: f.path.split('/').pop(), size: f.fileSize || 0,
+    get: async () => {
+      const u8 = await fetchBytes(f.downloads[0], f.path);
+      if (f.hashes && f.hashes.sha1 && await sha1hex(u8) !== f.hashes.sha1) throw new Error('hash does not match the modpack index');
+      return u8;
+    }
+  }));
+  await descend(() => analyzeBatch(items, `${S.mrpack.name || S.name} · ${items.length} mods`));
 }
 
 async function dex2jar(items) {
@@ -543,6 +719,7 @@ async function analyzePE(u8) {
   S.strings = Inspect.extractStrings(u8);
   const res = Scan.newResult();
   for (const s of S.strings) Scan.scanString(res, s.s, '0x' + s.off.toString(16).padStart(8, '0'));
+  if (S.py) await loadPython(u8, res);
   setScan(res);
   if (!S.jarBytes) {
     const c = S.scan.count;
@@ -553,6 +730,88 @@ async function analyzePE(u8) {
       : py ? 'PyInstaller bundle: see DETAILS for the bundled files.'
         : 'No Java code found in this executable. Native machine code cannot be decompiled to Java — see DETAILS and STRINGS.');
   }
+}
+
+// ------------------------------------------------------------------ python (PyInstaller)
+
+const inflate = async data => new Uint8Array(await new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
+
+async function loadPython(u8, res) {
+  const py = S.py;
+  const mods = [];
+  for (const f of py.files) {
+    if (f.type === 's') {
+      const raw = u8.subarray(f.off, f.off + f.csize);
+      mods.push({ name: f.name, script: true, boot: /^(pyiboot|pyi_rth_|_pyi_)/.test(f.name), get: () => f.compressed ? inflate(raw) : Promise.resolve(raw.slice()) });
+    } else if (f.type === 'z') {
+      const pyzBytes = u8.subarray(f.off, f.off + f.csize);
+      try {
+        const pyz = Inspect.parsePYZ(pyzBytes, py.pyver);
+        py.magic = pyz.magic;
+        for (const e of pyz.entries) {
+          const raw = pyzBytes.subarray(e.off, e.off + e.len);
+          mods.push({ name: e.name, pkg: e.pkg, get: () => inflate(raw) });
+        }
+      } catch (err) {
+        S.log.push(`could not read ${f.name}: ${err.message} (encrypted PYZ archives from old PyInstaller --key builds aren't supported)`);
+      }
+    }
+  }
+  py.mods = mods.length;
+  let ok = 0, failed = 0;
+  for (let i = 0; i < mods.length; i++) {
+    const m = mods[i];
+    if (i % 60 === 0) { setState(`reading Python modules ${i}/${mods.length}`, 8 + 80 * i / mods.length); await new Promise(r => setTimeout(r, 0)); }
+    const path = m.script ? (m.boot ? '(pyinstaller)/' : '') + m.name + '.py' : m.name.replace(/\./g, '/') + (m.pkg ? '/__init__.py' : '.py');
+    const f = { path, type: 'py', module: m.name, script: !!m.script, boot: !!m.boot, get: m.get, text: null };
+    try {
+      const code = Inspect.unmarshal(await m.get(), py.pyver).value;
+      const sum = Inspect.pyCodeSummary(code);
+      f.summary = sum;
+      f.text = pyListing(f, sum);
+      for (const st of sum.strings) Scan.scanString(res, st, m.name);
+      if (sum.strings.length) S.cpStrings.set(m.name, sum.strings.length > 400 ? sum.strings.slice(0, 400) : sum.strings);
+      ok++;
+    } catch (err) {
+      f.text = `# ${m.name}\n# could not read this module: ${err.message}\n`;
+      failed++;
+    }
+    S.files.set(path, f);
+    S.classToSrc.set(m.name, path);
+    if (m.script && !m.boot) { S.entrypoints.add(m.name); f.entry = true; }
+  }
+  S.log.push(`[python] read ${ok} modules${failed ? `, ${failed} failed` : ''} from the PyInstaller archive (Python ${py.pyver})`);
+  tag(`${ok} Python modules`, 'java');
+}
+
+function pyListing(f, sum) {
+  const lines = [
+    `# ${f.module}${f.script ? '  (entry script)' : ''}`,
+    `# compiled Python ${S.py.pyver} — EZLARP shows names and constants, not decompiled source.`,
+    `# For full source: download the .pyc (button above) and run pycdc, decompyle3 or pylingual.`, ''];
+  if (sum.outline.length) {
+    lines.push('# ---- functions and classes ----');
+    for (const o of sum.outline.slice(0, 2000)) lines.push('    '.repeat(o.depth - 1) + (o.isClass ? `class ${o.name}:` : `def ${o.name}(${o.args ? o.args + ' args' : ''})`) + `  # line ${o.line}`);
+    lines.push('');
+  }
+  if (sum.names.length) {
+    lines.push(`# ---- names used (${sum.names.length}) ----`);
+    for (let i = 0; i < sum.names.length; i += 8) lines.push('# ' + sum.names.slice(i, i + 8).join(', '));
+    lines.push('');
+  }
+  lines.push(`# ---- string constants (${sum.strings.length}) ----`);
+  for (const st of sum.strings.slice(0, 5000)) lines.push(JSON.stringify(st));
+  return lines.join('\n') + '\n';
+}
+
+const PY_MAGIC = { '3.7': 0x0d42, '3.8': 0x0d55, '3.9': 0x0d61, '3.10': 0x0d6f, '3.11': 0x0da7, '3.12': 0x0dcb, '3.13': 0x0df3 };
+async function pycBytes(f) {
+  if (!S.py.magic && PY_MAGIC[S.py.pyver]) { const m = PY_MAGIC[S.py.pyver]; S.py.magic = new Uint8Array([m & 0xff, m >> 8, 0x0d, 0x0a]); }
+  const body = await f.get();
+  const out = new Uint8Array(16 + body.length);
+  if (S.py.magic) out.set(Inspect.pycHeader(S.py.magic), 0);
+  out.set(body, 16);
+  return out;
 }
 
 async function extractPy(i) {
@@ -834,7 +1093,9 @@ el.dl.onclick = async () => {
   try {
     const zip = new JSZip();
     for (const f of S.files.values()) {
+      if (f.virtual) continue;
       if (f.type === 'src') { if (f.text != null) zip.file(f.path, f.text); }
+      else if (f.type === 'py') zip.file(f.path + 'c', await pycBytes(f));
       else zip.file(f.path, f.bytes || await f.zipEntry.async('uint8array'));
     }
     const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
