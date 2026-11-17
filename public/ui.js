@@ -52,7 +52,7 @@ const hex = (n, w = 8) => '0x' + n.toString(16).toUpperCase().padStart(w, '0');
 const ext = p => { const m = /\.([^./]+)$/.exec(p); return m ? m[1].toLowerCase() : ''; };
 const baseOf = p => p.slice(p.lastIndexOf('/') + 1);
 const dots = s => s.replace(/\//g, '.');
-const plural = (n, w) => `${n} ${n === 1 ? w : /(?:s|x|ch|sh)$/.test(w) ? w + 'es' : w + 's'}`;
+const plural = (n, w) => `${n} ${n === 1 ? w : /(?:s|x|ch|sh)$/.test(w) ? w + 'es' : /[^aeiou]y$/.test(w) ? w.slice(0, -1) + 'ies' : w + 's'}`;
 
 function setState(text, pct) {
   el.fstate.textContent = text;
@@ -141,7 +141,7 @@ function renderResult() {
   el.report.hidden = !!S.batch;
   el.dl.hidden = !hasFiles;
   el.decall.hidden = !(S.lazy && pendingCount() > 0);
-  el.cmp.hidden = !S.jarInfo || !S.jarInfo.classCount;
+  el.cmp.hidden = !S.jarInfo || !S.jarInfo.classCount || !!S.dexMode;
   el.rtabs.querySelector('[data-view=compare]').hidden = !S.cmp;
   renderVerdict();
   renderBanner();
@@ -1075,11 +1075,11 @@ function jarDetails() {
       ['license', m.license ? esc(m.license) : null],
     ]));
   }
-  h += section(S.embedded ? 'EMBEDDED JAVA ARCHIVE' : S.apk ? 'CONVERTED CLASSES (dex2jar)' : 'JAVA ARCHIVE', kv([
+  h += section(S.embedded ? 'EMBEDDED JAVA ARCHIVE' : S.dexMode ? 'DEX CLASSES' : 'JAVA ARCHIVE', kv([
     ['classes', j.classCount],
     ['source files', [...S.files.values()].filter(f => f.type === 'src').length + (S.lazy ? ` (${[...S.files.values()].filter(f => f.type === 'src' && f.text != null).length} decompiled so far)` : '')],
     ['resources', S.files.size - [...S.files.values()].filter(f => f.type === 'src').length],
-    ['bytecode target', esc(versionSummary(j.versions) || '—')],
+    ['bytecode target', j.dalvik ? 'Dalvik (Android dex), converted per class when opened' : esc(versionSummary(j.versions) || '—')],
     ['main class', j.mainClass ? (fileForClass(j.mainClass.trim().replace(/\./g, '/')) ? `<a class="link" data-cls="${esc(j.mainClass.trim().replace(/\./g, '/'))}">${esc(j.mainClass.trim())}</a>` : esc(j.mainClass.trim())) : null],
     ['detected', j.kinds.length ? esc(j.kinds.join(', ')) : null],
     ['multi-release', j.multiRelease ? 'yes' : null],

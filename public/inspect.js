@@ -597,6 +597,120 @@ const Inspect = (() => {
     return out.replace(/<([^\/!?][^>]*)>\n\s*<\/[^>]+>/g, '<$1/>');
   }
 
+  // ------------------------------------------------------------ DEX (Dalvik) reader
+
+  // Instruction widths in 16-bit code units, by opcode (payload pseudo-ops handled separately).
+  const DEX_W = new Uint8Array(256).fill(1);
+  (() => {
+    const set = (a, b, w) => { for (let i = a; i <= b; i++) DEX_W[i] = w; };
+    set(0x02, 0x02, 2); set(0x03, 0x03, 3); set(0x05, 0x05, 2); set(0x06, 0x06, 3); set(0x08, 0x08, 2); set(0x09, 0x09, 3);
+    set(0x13, 0x13, 2); set(0x14, 0x14, 3); set(0x15, 0x16, 2); set(0x17, 0x17, 3); set(0x18, 0x18, 5); set(0x19, 0x1a, 2);
+    set(0x1b, 0x1b, 3); set(0x1c, 0x1c, 2); set(0x1f, 0x20, 2); set(0x22, 0x23, 2); set(0x24, 0x26, 3); set(0x29, 0x29, 2);
+    set(0x2a, 0x2c, 3); set(0x2d, 0x3d, 2); set(0x44, 0x6d, 2); set(0x6e, 0x72, 3); set(0x74, 0x78, 3); set(0x90, 0xaf, 2);
+    set(0xd0, 0xe2, 2); set(0xfa, 0xfb, 4); set(0xfc, 0xfd, 3); set(0xfe, 0xff, 2);
+  })();
+
+  // Parses a .dex file. Returns { version, classes: [{ name, superName, strings, refs, classes }] } where
+  // strings/refs/classes have the same meaning as parseClass(u8, true) gives for a .class file.
+  function parseDex(u8) {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const u32 = o => dv.getUint32(o, true), u16 = o => dv.getUint16(o, true);
+    let p = 0;
+    const uleb = () => { let r = 0, s = 0, b; do { b = u8[p++]; r |= (b & 0x7f) << s; s += 7; } while (b & 0x80 && s < 35); return r >>> 0; };
+    const nStr = u32(0x38), oStr = u32(0x3c), nType = u32(0x40), oType = u32(0x44);
+    const oField = u32(0x54), nMeth = u32(0x58), oMeth = u32(0x5c), nClass = u32(0x60), oClass = u32(0x64);
+    const strCache = new Array(nStr);
+    const str = i => {
+      if (i >= nStr) return null;
+      let v = strCache[i];
+      if (v !== undefined) return v;
+      let sp = u32(oStr + i * 4);
+      while (u8[sp] & 0x80) sp++;
+      sp++;
+      let end = sp;
+      while (end < u8.length && u8[end]) end++;
+      v = strCache[i] = decodeMUTF8(u8, sp, end - sp);
+      return v;
+    };
+    const typeName = t => {
+      if (t >= nType) return null;
+      const d = str(u32(oType + t * 4));
+      return d && d[0] === 'L' ? d.slice(1, -1) : d;
+    };
+    const methRef = m => m < nMeth ? typeName(u16(oMeth + m * 8)) + '.' + str(u32(oMeth + m * 8 + 4)) : null;
+    const fieldOwner = f => typeName(u16(oField + f * 8));
+
+    const skipEncodedValue = () => {
+      const b = u8[p++], type = b & 0x1f, arg = b >> 5;
+      if (type === 0x1c) { const n = uleb(); for (let i = 0; i < n; i++) skipEncodedValue(); }
+      else if (type === 0x1d) { uleb(); const n = uleb(); for (let i = 0; i < n; i++) { uleb(); skipEncodedValue(); } }
+      else if (type === 0x1e || type === 0x1f) { /* no payload */ }
+      else p += arg + 1;
+    };
+
+    const classes = [];
+    for (let c = 0; c < nClass; c++) {
+      const d = oClass + c * 32;
+      const name = typeName(u32(d));
+      const superIdx = u32(d + 8);
+      const info = { name, superName: superIdx === 0xffffffff ? null : typeName(superIdx), strings: [], refs: [], classes: [] };
+      const strs = new Set(), refs = new Set(), types = new Set();
+      // static final String constants live in static_values, not in code
+      const sv = u32(d + 28);
+      if (sv) {
+        p = sv;
+        const n = uleb();
+        for (let i = 0; i < n; i++) {
+          const b = u8[p], type = b & 0x1f, arg = b >> 5;
+          if (type === 0x17) {
+            p++;
+            let idx = 0;
+            for (let k = 0; k <= arg; k++) idx |= u8[p + k] << (8 * k);
+            p += arg + 1;
+            const v = str(idx >>> 0);
+            if (v != null) strs.add(v);
+          } else skipEncodedValue();
+        }
+      }
+      const cd = u32(d + 24);
+      if (cd) {
+        p = cd;
+        const sf = uleb(), inf = uleb(), dm = uleb(), vm = uleb();
+        for (let i = 0; i < sf + inf; i++) { uleb(); uleb(); }
+        const codes = [];
+        for (let i = 0; i < dm + vm; i++) { uleb(); uleb(); const off = uleb(); if (off) codes.push(off); }
+        for (const off of codes) {
+          const n = u32(off + 12);
+          let q = off + 16;
+          const end = Math.min(u8.length - 1, q + n * 2);
+          while (q < end) {
+            const op = u8[q];
+            if (op === 0x00 && u8[q + 1] !== 0) {
+              const ident = u16(q);
+              if (ident === 0x0100) q += (u16(q + 2) * 2 + 4) * 2;
+              else if (ident === 0x0200) q += (u16(q + 2) * 4 + 2) * 2;
+              else if (ident === 0x0300) q += (Math.floor((u16(q + 2) * u32(q + 4) + 1) / 2) + 4) * 2;
+              else q += 2;
+              continue;
+            }
+            if (op === 0x1a) { const v = str(u16(q + 2)); if (v != null) strs.add(v); }
+            else if (op === 0x1b) { const v = str(u32(q + 2)); if (v != null) strs.add(v); }
+            else if ((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78) || op === 0xfa || op === 0xfb) { const r = methRef(u16(q + 2)); if (r) refs.add(r); }
+            else if (op === 0x1c || op === 0x1f || op === 0x20 || op === 0x22 || op === 0x23 || op === 0x24 || op === 0x25) { const t = typeName(u16(q + 2)); if (t) types.add(t); }
+            else if (op >= 0x52 && op <= 0x6d) { const f = u16(q + 2); const t = fieldOwner(f); if (t) { types.add(t); refs.add(t + '.' + str(u32(oField + f * 8 + 4))); } }
+            q += DEX_W[op] * 2;
+          }
+        }
+      }
+      for (const r of refs) types.add(r.slice(0, r.lastIndexOf('.')));
+      info.strings = [...strs];
+      info.refs = [...refs];
+      info.classes = [...types].filter(t => t && t[0] !== '[');
+      classes.push(info);
+    }
+    return { version: String.fromCharCode(u8[4], u8[5], u8[6]), classes };
+  }
+
   // ------------------------------------------------------------ MD5
 
   function md5(u8) {
@@ -772,5 +886,5 @@ const Inspect = (() => {
     return '';
   }
 
-  return { sniff, parseClass, javaVersion, parsePE, parsePyInstaller, unmarshal, pyCodeSummary, parsePYZ, pycHeader, dexInfo, decodeAXML, md5, detectSignatures, findEmbeddedZip, extractStrings, classifyString, MACHINES, SUBSYSTEMS };
+  return { sniff, parseClass, parseDex, javaVersion, parsePE, parsePyInstaller, unmarshal, pyCodeSummary, parsePYZ, pycHeader, dexInfo, decodeAXML, md5, detectSignatures, findEmbeddedZip, extractStrings, classifyString, MACHINES, SUBSYSTEMS };
 })();

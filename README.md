@@ -52,7 +52,7 @@ browser
 | `public/vendor/jszip.min.js` | JSZip 3.10.1 |
 | `public/vineflower-1.12.0.jar`, `cfr-0.152.jar` | decompiler engines (unmodified upstream releases) |
 | `public/d2j-bundle-2.4.jar` | dex2jar 2.4 + ASM 9.5 (unmodified classes, merged into one jar) |
-| `public/ezlarp-helper-v2.jar` | drivers built from `tools/helper/src/ezlarp/*.java` (Run, Dex, Asm) |
+| `public/ezlarp-helper-v3.jar` | drivers built from `tools/helper/src/ezlarp/*.java` (Run, Dex, Asm) |
 | `public/samples/` | sample files for the "try" buttons, built by `tools/samples/build.sh` |
 | `public/_headers` | long cache for the (versioned) jars |
 

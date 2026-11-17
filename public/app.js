@@ -1,9 +1,9 @@
 // EZLARP: analysis flow + Java engines. Everything runs client-side:
 // CheerpJ 5 (WebAssembly JVM, Java 17) runs Vineflower / CFR / dex2jar / ASM
-// through small driver classes in ezlarp-helper-v2.jar; JSZip handles archives.
+// through small driver classes in ezlarp-helper-v3.jar; JSZip handles archives.
 'use strict';
 
-const HELPER = '/app/ezlarp-helper-v2.jar';
+const HELPER = '/app/ezlarp-helper-v3.jar';
 const CP_DECOMPILE = `${HELPER}:/app/vineflower-1.12.0.jar:/app/cfr-0.152.jar`;
 const CP_D2J = `${HELPER}:/app/d2j-bundle-2.4.jar`;
 // source files; above this, decompile on demand (#lazy=N in the URL overrides, handy for testing)
@@ -264,7 +264,8 @@ async function analyze(name, u8, opts = {}) {
       S.dex = Inspect.dexInfo(u8);
       el.ftype.textContent = `Android DEX v${S.dex.version}`;
       tag(`${S.dex.classes} dex classes`, 'java');
-      S.jarBytes = await dex2jar([{ name, u8 }]);
+      S.dexMode = { dexes: [{ name, u8 }] };
+      S.resZip = new JSZip();
     } else if (kind === 'pe') {
       S.kind = 'pe';
       await analyzePE(u8);
@@ -276,11 +277,17 @@ async function analyze(name, u8, opts = {}) {
       S.jarBytes = emb.slice();
     }
 
-    if (S.jarBytes) {
+    if (S.jarBytes || S.dexMode) {
       setState('reading archive', 8);
-      S.jarInfo = await analyzeJar(S.jarBytes, S.resZip || S.preZip);
-      buildFiles();
-      await scanJar();
+      if (S.dexMode) {
+        S.jarInfo = await analyzeDex();
+        buildFiles();
+        await scanDex();
+      } else {
+        S.jarInfo = await analyzeJar(S.jarBytes, S.resZip || S.preZip);
+        buildFiles();
+        await scanJar();
+      }
       addJarTags();
       if (!S.jarInfo.classCount) {
         S.log.push('archive contains no .class files — showing resources only');
@@ -467,9 +474,52 @@ async function modMeta(read, has) {
   return null;
 }
 
+// Android: read the dex files directly (no JVM). Classes are converted to Java bytecode
+// only when they are opened or when "decompile all" runs, in chunks.
+async function analyzeDex() {
+  const dm = S.dexMode;
+  dm.classDex = new Map();
+  dm.parsed = [];
+  for (let i = 0; i < dm.dexes.length; i++) {
+    const d = dm.dexes[i];
+    setState(`reading ${d.name} (${i + 1}/${dm.dexes.length})`, 8 + 10 * i / dm.dexes.length);
+    await new Promise(r => setTimeout(r, 0));
+    let parsed;
+    try { parsed = Inspect.parseDex(d.u8); } catch (e) { S.log.push(`could not read ${d.name}: ${e.message}`); continue; }
+    for (const c of parsed.classes) {
+      if (!c.name || dm.classDex.has(c.name)) continue;
+      dm.classDex.set(c.name, i);
+      dm.parsed.push(c);
+    }
+  }
+  const rz = S.resZip;
+  const resources = Object.values(rz.files).filter(f => !f.dir && !/^classes\d*\.dex$/.test(f.name));
+  const has = n => !!rz.file(n);
+  const pk = new Map();
+  for (const c of dm.parsed) {
+    const parts = c.name.split('/');
+    const key = parts.length < 2 ? '(default package)' : parts.slice(0, Math.min(3, parts.length - 1)).join('/');
+    pk.set(key, (pk.get(key) || 0) + 1);
+  }
+  return {
+    zip: null, rz, entries: [], classes: [], resources, classCount: dm.parsed.length, versions: {}, manifest: '', mainClass: null,
+    kinds: S.apk ? ['Android app'] : ['Android dex'], signed: resources.some(e => /^META-INF\/[^/]+\.(SF|RSA|DSA|EC)$/i.test(e.name)),
+    nestedList: resources.filter(e => ARCHIVE_RE.test(e.name)).map(e => ({ name: e.name, size: (e._data && e._data.uncompressedSize) || 0 })),
+    packages: [...pk.entries()].sort((a, b) => b[1] - a[1]), meta: null, multiRelease: false, dalvik: true, has
+  };
+}
+
 function buildFiles() {
   const j = S.jarInfo;
   S.files = new Map();
+  if (S.dexMode) {
+    for (const c of S.dexMode.parsed) {
+      const p = srcPathOf(c.name);
+      let f = S.files.get(p);
+      if (!f) S.files.set(p, f = { path: p, type: 'src', text: null, classes: [], dexClasses: [] });
+      f.dexClasses.push(c.name);
+    }
+  }
   for (const c of j.classes) {
     if (/^META-INF\/versions\//.test(c.name)) continue;
     const p = srcPathOf(c.name);
@@ -486,6 +536,46 @@ function buildFiles() {
   if (S.apk && S.apk.entry) for (const e of S.apk.entry) S.entrypoints.add(e.replace(/\./g, '/'));
 }
 
+async function scanDex() {
+  const res = Scan.newResult();
+  const names = [];
+  const list = S.dexMode.parsed;
+  for (let i = 0; i < list.length; i++) {
+    if (i % 2000 === 0) { setState(`scanning classes ${i}/${list.length}`, 18 + 4 * i / list.length); await new Promise(r => setTimeout(r, 0)); }
+    indexClass(list[i], srcPathOf(list[i].name), names);
+    Scan.scanClass(res, list[i]);
+  }
+  await finishScan(res, names);
+  S.log.push(`[dex] read ${list.length} classes from ${plural(S.dexMode.dexes.length, 'dex file')} directly; classes are converted to Java when opened`);
+}
+
+// Indexes one parsed class for jump-to-class, usages and string search.
+function indexClass(info, srcPath, names) {
+  S.classToSrc.set(info.name, srcPath);
+  const simple = info.name.slice(info.name.lastIndexOf('/') + 1);
+  for (const part of new Set([simple, simple.split('$').pop()])) {
+    if (!S.simpleIndex.has(part)) S.simpleIndex.set(part, []);
+    S.simpleIndex.get(part).push(info.name);
+  }
+  names.push(info.name);
+  for (const c of info.classes) {
+    if (c === info.name || c[0] === '[' || c.startsWith('java/')) continue;
+    let set = S.xrefs.get(c);
+    if (!set) S.xrefs.set(c, set = new Set());
+    set.add(info.name);
+  }
+  const strs = info.strings.filter(x => x.length >= 2);
+  if (strs.length) S.cpStrings.set(info.name, strs.length > 400 ? strs.slice(0, 400) : strs);
+}
+
+async function finishScan(res, names) {
+  Scan.scanNames(res, names);
+  if (S.apk) for (const p of S.apk.perms) if (DANGEROUS_PERMS.test(p)) Scan.scanString(res, p, 'AndroidManifest.xml');
+  await scanInside(res, S.jarInfo.rz, '', 0);
+  setScan(res);
+  for (const ep of S.entrypoints) { const p = fileForClass(ep); if (p) S.files.get(p).entry = true; }
+}
+
 async function scanJar() {
   const j = S.jarInfo;
   const res = Scan.newResult();
@@ -498,29 +588,11 @@ async function scanJar() {
     if (!info || !info.name) continue;
     const versioned = /^META-INF\/versions\//.test(c.name);
     if (!versioned) {
-      S.classToSrc.set(info.name, srcPathOf(c.name));
-      const simple = info.name.slice(info.name.lastIndexOf('/') + 1);
-      for (const part of new Set([simple, simple.split('$').pop()])) {
-        if (!S.simpleIndex.has(part)) S.simpleIndex.set(part, []);
-        S.simpleIndex.get(part).push(info.name);
-      }
-      names.push(info.name);
-      for (const c of info.classes) {
-        if (c === info.name || c[0] === '[' || c.startsWith('java/')) continue;
-        let set = S.xrefs.get(c);
-        if (!set) S.xrefs.set(c, set = new Set());
-        set.add(info.name);
-      }
-      const strs = info.strings.filter(s => s.length >= 2);
-      if (strs.length) S.cpStrings.set(info.name, strs.length > 400 ? strs.slice(0, 400) : strs);
+      indexClass(info, srcPathOf(c.name), names);
     }
     Scan.scanClass(res, info);
   }
-  Scan.scanNames(res, names);
-  if (S.apk) for (const p of S.apk.perms) if (DANGEROUS_PERMS.test(p)) Scan.scanString(res, p, 'AndroidManifest.xml');
-  await scanInside(res, j.rz, '', 0);
-  setScan(res);
-  for (const ep of S.entrypoints) { const p = fileForClass(ep); if (p) S.files.get(p).entry = true; }
+  await finishScan(res, names);
 }
 
 const NATIVE_RE = /\.(dll|so|dylib|exe|jnilib|sys)$/i;
@@ -654,7 +726,7 @@ async function analyzeApk(zip) {
   if (a.versionName) tag('v' + a.versionName);
   if (a.perms.length) tag(plural(a.perms.length, 'permission'), a.perms.some(p => DANGEROUS_PERMS.test(p)) ? 'warn' : '');
   if (a.debuggable) tag('debuggable', 'warn');
-  if (items.length) S.jarBytes = await dex2jar(items);
+  if (items.length) S.dexMode = { dexes: items };
   else S.log.push('no classes*.dex found — nothing to decompile');
 }
 
@@ -696,7 +768,7 @@ async function dex2jar(items) {
     await ensureJVM();
     cheerpOSAddStringFile(inPath, u8);
     await runJava('ezlarp.Dex', CP_D2J, [inPath, outPath], { total: info ? info.classes : 0, label: `dex2jar ${name}`, from: 10, to: 18 });
-    const z = await JSZip.loadAsync(await (await cjFileBlob(outPath)).arrayBuffer());
+    const z = await JSZip.loadAsync(await readJavaOutput(outPath, `dex2jar on ${name}`));
     for (const f of Object.values(z.files)) {
       if (f.dir) continue;
       if (f.name === 'ezlarp/log.txt') {
@@ -764,6 +836,13 @@ async function analyzePE(u8) {
   for (const s of S.strings) Scan.scanString(res, s.s, '0x' + s.off.toString(16).padStart(8, '0'));
   if (S.py) await loadPython(u8, res);
   setScan(res);
+  if (!S.jarBytes && pe.ok) {
+    if (!py) tag(pe.dotnet ? '.NET (C#/VB) code' : 'native machine code', pe.dotnet ? 'java' : '');
+    tag(Inspect.MACHINES[pe.machine] || 'unknown CPU');
+    const sub = Inspect.SUBSYSTEMS[pe.subsystem] || '';
+    if (/gui/i.test(sub)) tag('GUI app'); else if (/console/i.test(sub)) tag('console app');
+    if (pe.imports && pe.imports.length) tag(plural(pe.imports.length, 'DLL') + ' imported');
+  }
   if (!S.jarBytes) {
     const c = S.scan.count;
     if (c.high) tag(plural(c.high, 'high-risk indicator'), 'bad');
@@ -918,6 +997,7 @@ function ensureJVM() {
 }
 
 function ensureJarPath() {
+  if (S.dexMode) return null;
   if (!S.jarPath) {
     S.jarPath = `/str/jar-${uid()}.jar`;
     cheerpOSAddStringFile(S.jarPath, S.jarBytes);
@@ -965,12 +1045,21 @@ function engineOpts(engine) {
   return engine === 'cfr' ? ['renameillegalidents=true', 'renamedupmembers=true', 'renamesmallmembers=3'] : ['rename-members=1'];
 }
 
+// Reads a file the JVM wrote. cjFileBlob gives null (not an error) when it is missing,
+// which happens when the in-browser JVM runs out of memory or is killed.
+async function readJavaOutput(path, what) {
+  let blob = null;
+  try { blob = await cjFileBlob(path); } catch (e) { /* treated as missing */ }
+  if (!blob) {
+    throw new Error(`${what} produced no output. The in-browser Java runtime most likely ran out of memory or was stopped by the browser (common on phones with very large files). Try again on a computer, or open single classes instead of "decompile all".`);
+  }
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
 async function runDecompiler(engine, inPath, extra, prog) {
   const outPath = `/files/ezlarp/out-${uid()}.zip`;
   const code = await runJava('ezlarp.Run', CP_DECOMPILE, [engine, inPath, outPath, ...engineOpts(engine), ...extra], prog);
-  let blob;
-  try { blob = await cjFileBlob(outPath); } catch (e) { throw new Error(`${ENGINES[engine]} produced no output (exit code ${code})`); }
-  const zip = await JSZip.loadAsync(await blob.arrayBuffer());
+  const zip = await JSZip.loadAsync(await readJavaOutput(outPath, `${ENGINES[engine]} (exit code ${code})`));
   const sources = {};
   for (const f of Object.values(zip.files)) if (!f.dir && f.name.startsWith('src/')) sources[f.name.slice(4)] = await f.async('string');
   const logFile = zip.file('ezlarp/log.txt');
@@ -991,7 +1080,7 @@ async function decompileAll(engine, fallback) {
       const t0 = performance.now();
       setState(`decompiling with ${ENGINES[eng]}`, 22);
       await ensureJVM();
-      const out = await runDecompiler(eng, ensureJarPath(), [], { total: groups, label: `decompiling with ${ENGINES[eng]}` });
+      const out = S.dexMode ? await decompileDexChunks(eng) : await runDecompiler(eng, ensureJarPath(), [], { total: groups, label: `decompiling with ${ENGINES[eng]}` });
       S.seconds = (performance.now() - t0) / 1000;
       S.engine = S.engineUsed = eng;
       for (const f of S.files.values()) if (f.type === 'src') { f.text = null; f.error = null; f.bytecode = null; f.view = 'src'; }
@@ -1021,7 +1110,74 @@ async function decompileAll(engine, fallback) {
   throw lastErr;
 }
 
+// Converts the given dex classes to a jar; returns its path in the CheerpJ file system.
+async function dexClassesJar(names, label) {
+  const dm = S.dexMode;
+  await ensureJVM();
+  const byDex = new Map();
+  for (const n of names) {
+    const i = dm.classDex.get(n);
+    if (i == null) continue;
+    if (!byDex.has(i)) byDex.set(i, []);
+    byDex.get(i).push(n);
+  }
+  const outs = [];
+  for (const [i, list] of byDex) {
+    const d = dm.dexes[i];
+    if (!d.path) { d.path = `/str/dex-${i}-${uid()}.dex`; cheerpOSAddStringFile(d.path, d.u8); }
+    const id = uid();
+    const filter = `/str/filter-${id}.txt`, outPath = `/files/ezlarp-dex/out-${id}.jar`;
+    cheerpOSAddStringFile(filter, list.join('\n'));
+    await runJava('ezlarp.Dex', CP_D2J, [d.path, outPath, filter], list.length > 50 ? { total: list.length, label: `converting ${label || ''} (dex2jar)`, from: 20, to: 40 } : {});
+    outs.push(await readJavaOutput(outPath, `dex2jar on ${d.name}`));
+  }
+  if (!outs.length) throw new Error('class not found in the dex files');
+  let bytes = outs[0];
+  if (outs.length > 1) {
+    const merged = new JSZip();
+    for (const o of outs) { const z = await JSZip.loadAsync(o); for (const f of Object.values(z.files)) if (!f.dir && f.name.endsWith('.class')) merged.file(f.name, await f.async('uint8array')); }
+    bytes = await merged.generateAsync({ type: 'uint8array', compression: 'STORE' });
+  } else {
+    const z = await JSZip.loadAsync(bytes);
+    const log = z.file('ezlarp/log.txt');
+    const txt = log ? (await log.async('string')).trim() : '';
+    if (txt) S.log.push(`[dex2jar]\n${txt.split('\n').slice(0, 100).join('\n')}`);
+  }
+  const path = `/str/dexjar-${uid()}.jar`;
+  cheerpOSAddStringFile(path, bytes);
+  return path;
+}
+
+// "decompile all" for Android: convert + decompile in chunks so memory stays bounded.
+async function decompileDexChunks(eng) {
+  const files = [...S.files.values()].filter(f => f.type === 'src' && f.dexClasses);
+  const CHUNK = 600;
+  const sources = {};
+  const logs = [];
+  let done = 0, failed = 0;
+  for (let i = 0; i < files.length;) {
+    const chunk = [];
+    let n = 0;
+    while (i < files.length && (n < CHUNK || !chunk.length)) { chunk.push(files[i]); n += files[i].dexClasses.length; i++; }
+    setState(`decompiling with ${ENGINES[eng]} · ${done}/${files.length} files`, 20 + 76 * done / files.length);
+    try {
+      const jar = await dexClassesJar(chunk.flatMap(f => f.dexClasses), `${done + 1}-${done + chunk.length}`);
+      const out = await runDecompiler(eng, jar, []);
+      Object.assign(sources, out.sources);
+      if (out.log) logs.push(out.log.split('\n').slice(0, 50).join('\n'));
+    } catch (e) {
+      failed += chunk.length;
+      logs.push(`[chunk ${done + 1}-${done + chunk.length}] ${e.message || e}`);
+    }
+    done += chunk.length;
+  }
+  if (!Object.keys(sources).length) throw new Error(logs.slice(-1)[0] || 'nothing decompiled');
+  if (failed) S.log.push(`${failed} source files could not be decompiled in bulk; open them one by one to retry`);
+  return { sources, log: logs.join('\n') };
+}
+
 async function miniJar(f) {
+  if (S.dexMode) return dexClassesJar(f.dexClasses, baseOf(f.path));
   const z = new JSZip();
   for (const c of f.classes) z.file(c.name, await c.async('uint8array'));
   const id = uid();
@@ -1045,7 +1201,7 @@ async function ensureSource(f) {
       const lib = ensureJarPath();
       for (const eng of order) {
         try {
-          const out = await runDecompiler(eng, inPath, ['ezlarp.lib=' + lib]);
+          const out = await runDecompiler(eng, inPath, lib ? ['ezlarp.lib=' + lib] : []);
           const key = Object.keys(out.sources).find(k => k === f.path || f.path.endsWith('/' + k)) || Object.keys(out.sources)[0];
           f.text = out.sources[key];
           f.engine = eng;
@@ -1073,7 +1229,7 @@ async function ensureBytecode(f) {
   const inPath = await miniJar(f);
   const outPath = `/files/ezlarp-asm/out-${uid()}.zip`;
   await runJava('ezlarp.Asm', CP_D2J, [inPath, outPath]);
-  const z = await JSZip.loadAsync(await (await cjFileBlob(outPath)).arrayBuffer());
+  const z = await JSZip.loadAsync(await readJavaOutput(outPath, 'the bytecode viewer'));
   const parts = Object.values(z.files).filter(x => !x.dir).sort((a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name));
   const texts = [];
   for (const p of parts) texts.push(await p.async('string'));
@@ -1100,7 +1256,7 @@ el.decall.onclick = async () => {
 };
 
 el.retry.onclick = async () => {
-  if (busy || !S.jarBytes) return;
+  if (busy || !(S.jarBytes || S.dexMode)) return;
   const other = S.engine === 'vf' ? 'cfr' : 'vf';
   el.err.hidden = true;
   if (S.lazy) {

@@ -7,6 +7,7 @@ import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -28,7 +29,11 @@ import com.googlecode.dex2jar.ir.IrMethod;
 /**
  * EZLARP dex -> jar converter (dex2jar, runs inside CheerpJ).
  *
- * usage: ezlarp.Dex <classes.dex> <output.jar>
+ * usage: ezlarp.Dex <classes.dex> <output.jar> [classes.txt]
+ *
+ * With classes.txt (one internal class name per line, e.g. com/foo/Bar$1),
+ * only those classes are converted. That keeps memory low for huge apps:
+ * the page converts just the classes being opened.
  *
  * Writes classes straight into the output zip (no temp directory), plus
  * "ezlarp/log.txt". Prints "EZP <n>" after each class.
@@ -60,7 +65,13 @@ public final class Dex {
     zip = new ZipOutputStream(new FileOutputStream(out));
     zip.setLevel(1);
     try {
-      convert(Files.readAllBytes(new File(args[0]).toPath()));
+      Set<String> only = null;
+      if (args.length > 2) {
+        only = new HashSet<>();
+        List<String> lines = Files.readAllLines(new File(args[2]).toPath(), StandardCharsets.UTF_8);
+        for (String l : lines) if (!l.trim().isEmpty()) only.add("L" + l.trim() + ";");
+      }
+      convert(Files.readAllBytes(new File(args[0]).toPath()), only);
     } catch (Throwable t) {
       log.append("[fatal] ").append(stack(t)).append('\n');
     } finally {
@@ -70,7 +81,7 @@ public final class Dex {
     System.out.println("EZD " + count);
   }
 
-  private static void convert(byte[] dex) throws Exception {
+  private static void convert(byte[] dex, final Set<String> only) throws Exception {
     final DexExceptionHandler handler = new DexExceptionHandler() {
       @Override
       public void handleFileException(Exception e) {
@@ -90,7 +101,13 @@ public final class Dex {
     };
 
     DexFileReader reader = new DexFileReader(dex);
-    DexFileNode fileNode = new DexFileNode();
+    DexFileNode fileNode = new DexFileNode() {
+      @Override
+      public com.googlecode.d2j.visitors.DexClassVisitor visit(int access, String className, String superClass, String[] interfaces) {
+        if (only != null && !only.contains(className)) return null; // skip: not requested
+        return super.visit(access, className, superClass, interfaces);
+      }
+    };
     try {
       reader.accept(fileNode, DexFileReader.SKIP_DEBUG | DexFileReader.IGNORE_READ_EXCEPTION);
     } catch (Exception e) {
