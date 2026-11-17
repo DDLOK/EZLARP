@@ -589,7 +589,7 @@ function addJarTags() {
     else tag('no high-risk indicators', 'good');
   }
   const nestedClasses = (S.nestedRows || []).reduce((a, r) => a + (r.classes || 0), 0);
-  if (j.classCount || !nestedClasses) tag(plural(j.classCount, 'class'), 'java');
+  if (j.classCount || (!nestedClasses && !S.mrpack)) tag(plural(j.classCount, 'class'), 'java');
   if (nestedClasses) tag(plural(nestedClasses, 'class') + ' in nested jars', 'java');
   const top = Object.entries(j.versions).sort((a, b) => b[1] - a[1])[0];
   if (top) tag('target ' + Inspect.javaVersion(+top[0]), 'java');

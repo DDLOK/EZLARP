@@ -256,7 +256,33 @@ const Scan = (() => {
     if (frac > 0.3) res.obf = { frac, short, weird, total: names.length };
   }
 
+  // Session-token reads in classes whose only URLs are Mojang / Microsoft endpoints
+  // (skin upload, realms, login) are a different thing from token theft.
+  const OFFICIAL = /^https?:\/\/(?:[\w-]+\.)*(?:minecraftservices\.com|mojang\.com|minecraft\.net|xboxlive\.com|live\.com|microsoftonline\.com|microsoft\.com)(?:[:/]|$)/i;
+  const MC_OFFICIAL = { id: 'mc-session-official', sev: 'med', title: 'Uses the Minecraft session token with Mojang / Microsoft servers',
+    why: 'Reads the access token in code that only contacts official Mojang or Microsoft endpoints (skin upload, Realms, login). Common for skin and account mods. Check that the token is not also passed to other classes that send data elsewhere.' };
+  function urlsByWhere(res) {
+    const m = new Map();
+    for (const [u, wheres] of res.urls) for (const w of wheres) { if (!m.has(w)) m.set(w, []); m.get(w).push(u); }
+    return m;
+  }
+
   function summarize(res) {
+    const sess = res.hits.get('mc-session');
+    if (sess) {
+      const byWhere = urlsByWhere(res);
+      const official = new Map(), other = new Map();
+      for (const [w, ev] of sess.where) {
+        const urls = byWhere.get(w) || [];
+        const exfil = ['webhook', 'telegram'].some(id => res.hits.get(id) && res.hits.get(id).where.has(w));
+        if (urls.length && urls.every(u => OFFICIAL.test(u)) && !exfil) official.set(w, new Set([...ev, 'contacts only: ' + urls.join(', ')]));
+        else other.set(w, ev);
+      }
+      if (official.size) {
+        res.hits.set('mc-session-official', { rule: MC_OFFICIAL, where: official });
+        if (other.size) sess.where = other; else res.hits.delete('mc-session');
+      }
+    }
     const findings = [...res.hits.values()].sort((a, b) => SEV_ORDER[a.rule.sev] - SEV_ORDER[b.rule.sev] || b.where.size - a.where.size);
     const count = { high: 0, med: 0, low: 0 };
     for (const f of findings) count[f.rule.sev]++;
