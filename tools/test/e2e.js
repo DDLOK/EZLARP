@@ -613,6 +613,52 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await page.waitForFunction(() => /CFR/.test(el.cmeta.textContent) && !/quick view/i.test(el.code.textContent), null, { timeout: 120000 }).catch(() => {});
   ok(/CFR/.test(await page.textContent('#cmeta')) && /Decompiled with CFR/.test(await code()), 'per-class engine switch', await page.textContent('#cmeta'));
 
+  // ---------------- VS Code layout (default in the Windows app, opt-in on PC)
+  console.log('vs code layout');
+  {
+    const ip = await ctx.newPage();
+    ip.on('pageerror', e => errors.push('ide: ' + e.message));
+    await ip.goto(BASE + '/#ide&noprewarm');
+    await ip.waitForSelector('#ide .ide-menubar button', { timeout: 10000 });
+    ok(await ip.isVisible('#idewelcome') && /Open File/.test(await ip.textContent('#idewelcome')), 'ide: welcome page');
+    ok(await ip.evaluate(() => document.body.classList.contains('ide-home')), 'ide: welcome state');
+    await ip.evaluate(() => loadSample('dotnet'));
+    await ip.waitForFunction(() => /analysis done/.test(document.getElementById('fstate').textContent), null, { timeout: 30000 });
+    ok(/MALICIOUS/.test(await ip.textContent('#sbv')), 'ide: verdict in status bar', await ip.textContent('#sbv'));
+    ok(+(await ip.textContent('#idepn')) > 5, 'ide: problems listed', await ip.textContent('#idepn'));
+    ok(/sample-dotnet\.exe — EZLARP/.test(await ip.textContent('#idettl')), 'ide: window title');
+    await ip.click('#ideact button[data-v=source]');
+    await ip.evaluate(() => openFile('Demo/Grabber.cs'));
+    await ip.waitForFunction(() => /class Grabber/.test(document.getElementById('code').textContent), null, { timeout: 15000 });
+    await ip.waitForTimeout(300);
+    ok(/Demo.*Grabber\.cs/.test(await ip.textContent('.ide-crumbs')), 'ide: breadcrumbs', await ip.textContent('.ide-crumbs'));
+    ok(/Run/.test(await ip.textContent('.ide-outline')), 'ide: outline');
+    ok(await ip.evaluate(() => { const c = document.querySelector('.ide-minimap'); const d = c.getContext('2d').getImageData(0, 0, c.width, Math.min(c.height, 200)).data; for (let i = 3; i < d.length; i += 4) if (d[i]) return true; return false; }), 'ide: minimap drawn');
+    ok(/C#/.test(await ip.textContent('#sbl')), 'ide: language in status bar');
+    await ip.click('.ide-prob.med');
+    await ip.waitForTimeout(400);
+    ok(/Grabber\.cs/.test(await ip.textContent('.ftab.active')), 'ide: problem opens its file');
+    await ip.keyboard.press('Control+p');
+    await ip.keyboard.type('progr');
+    await ip.waitForTimeout(200);
+    ok(/Program\.cs/.test(await ip.textContent('#idepal .it.on')), 'ide: quick open finds files');
+    await ip.keyboard.press('Enter');
+    await ip.waitForFunction(() => /static void Main/.test(document.getElementById('code').textContent), null, { timeout: 10000 }).catch(() => {});
+    ok(/static void Main/.test(await ip.textContent('#code')), 'ide: quick open opens the file');
+    await ip.keyboard.press('Control+Shift+P');
+    await ip.keyboard.type('minimap');
+    await ip.keyboard.press('Enter');
+    ok(await ip.evaluate(() => document.body.classList.contains('ide-nomini')), 'ide: command palette runs commands');
+    await ip.click('#idemenus button:nth-child(3)');
+    ok(/Toggle Minimap/.test(await ip.textContent('#idedd')), 'ide: View menu');
+    await ip.keyboard.press('Escape');
+    await ip.click('#ideact button[data-v=scan]');
+    ok(await ip.isVisible('#scan') && await ip.isVisible('#status'), 'ide: report view');
+    await ip.evaluate(() => { localStorage.removeItem('ezlarp.layout'); localStorage.removeItem('ezlarp.ide.minimap'); localStorage.removeItem('ezlarp.ide.panel'); });
+    await ip.screenshot({ path: SHOTS + '/30-ide.png' });
+    await ip.close();
+  }
+
   // ---------------- free scans, Discord login, VPN block (test server stands in for the functions)
   console.log('account');
   const acct = mode => page.evaluate(m => fetch('/__test/account?mode=' + m, { method: 'POST' }), mode);

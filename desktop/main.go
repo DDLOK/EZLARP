@@ -17,7 +17,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,7 +28,7 @@ import (
 )
 
 const (
-	Version = "1.0.0"
+	Version = "1.1.0"
 	Port    = 47613
 )
 
@@ -51,6 +50,7 @@ func main() {
 	install := flag.Bool("install", false, "install without asking")
 	portable := flag.Bool("portable", false, "run without installing")
 	noWindow := flag.Bool("no-window", false, "only run the helper (for testing)")
+	updated := flag.Bool("updated", false, "started by the updater")
 	flag.Parse()
 	files := flag.Args()
 
@@ -64,8 +64,15 @@ func main() {
 		}
 	}
 
+	cleanupOldExe()
 	token := newToken()
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", Port))
+	// after an update the page keeps its token, so the new helper reuses it
+	if t := os.Getenv("EZLARP_TOKEN"); *updated && len(t) == 48 {
+		token = t
+		os.Unsetenv("EZLARP_TOKEN")
+		afterUpdate()
+	}
+	ln, err := listenRetry(*updated)
 	if err != nil {
 		// another EZLARP is already running: hand it the files and quit
 		if handOff(files) {
@@ -76,6 +83,7 @@ func main() {
 	}
 	h := newHelper(token)
 	saveToken(token)
+	go h.checkUpdate()
 	ids := h.addFiles(files)
 	go func() {
 		if !*noWindow {
@@ -98,6 +106,7 @@ type entry struct {
 
 type helper struct {
 	token    string
+	update   remoteVersion
 	mu       sync.Mutex
 	files    map[string]entry
 	lastSeen time.Time
@@ -201,6 +210,20 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/ping":
 		writeJSON(w, map[string]any{"ok": true, "version": Version, "os": osName()})
+	case r.URL.Path == "/update":
+		if r.Method == http.MethodPost {
+			if err := h.applyUpdate(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "restarting": true})
+			go func() { time.Sleep(300 * time.Millisecond); os.Exit(0) }()
+			return
+		}
+		h.mu.Lock()
+		u := h.update
+		h.mu.Unlock()
+		writeJSON(w, map[string]any{"current": Version, "latest": u.Version, "available": u.Version != "" && newer(u.Version, Version), "checked": !u.checked.IsZero()})
 	case r.URL.Path == "/files":
 		h.mu.Lock()
 		list := make([]entry, 0, len(h.files))

@@ -48,6 +48,13 @@ func installDir() string {
 }
 func installedExe() string { return filepath.Join(installDir(), "EZLARP.exe") }
 
+// after a self-update: keep Settings → Apps in step with the new version
+func afterUpdate() {
+	if !shouldOfferInstall() {
+		_ = hidden("reg", "add", `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\EZLARP`, "/v", "DisplayVersion", "/t", "REG_SZ", "/d", Version, "/f")
+	}
+}
+
 func selfPath() string {
 	p, err := os.Executable()
 	if err != nil {

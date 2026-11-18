@@ -378,6 +378,7 @@ function fileRow(path, label, depth, html) {
   row.className = 'node' + (S.current === path ? ' active' : '') + (f.type === 'src' && !isOpened(f) ? ' pending' : '') +
     (flag === 'high' ? ' flag' : flag === 'med' ? ' flag-med' : '');
   row.dataset.path = path;
+  row.dataset.ext = ((/\.([a-z0-9]+)$/i.exec(path) || [])[1] || '').toLowerCase();
   row.style.paddingLeft = (8 + depth * 14) + 'px';
   const icon = f.type === 'src' ? 'J' : f.type === 'py' ? 'P' : f.type === 'cs' ? '#' : f.type === 'asm' ? '⚙' : ARCHIVE_RE.test(path) ? '⧉' : NATIVE_FILE_RE.test(path) ? '⚙' : IMG_RE.test(path) ? '▣' : '·';
   const color = f.type === 'src' || f.type === 'py' || f.type === 'cs' || f.type === 'asm' ? 'var(--accent2)' : ARCHIVE_RE.test(path) || NATIVE_FILE_RE.test(path) ? 'var(--warn)' : 'var(--dim)';
