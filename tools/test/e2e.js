@@ -42,6 +42,8 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
 
   // classic mode: small files decompile fully up front (#lazy=150), so the source-view tests below apply
   await page.goto(BASE + '/#lazy=150');
+  await page.evaluate(() => fetch('/__test/account?mode=off', { method: 'POST' })); // no scan limit unless a test turns it on
+  await page.goto(BASE + '/#lazy=150');
   ok(await page.title() === 'EZLARP — jar / apk / exe decompiler & scanner', 'title');
 
   // ---------------- sample mod jar
@@ -577,6 +579,48 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await page.selectOption('#fileeng', 'cfr');
   await page.waitForFunction(() => /CFR/.test(el.cmeta.textContent) && !/quick view/i.test(el.code.textContent), null, { timeout: 120000 }).catch(() => {});
   ok(/CFR/.test(await page.textContent('#cmeta')) && /Decompiled with CFR/.test(await code()), 'per-class engine switch', await page.textContent('#cmeta'));
+
+  // ---------------- free scans, Discord login, VPN block (test server stands in for the functions)
+  console.log('account');
+  const acct = mode => page.evaluate(m => fetch('/__test/account?mode=' + m, { method: 'POST' }), mode);
+  await acct('limit');
+  await page.goto(BASE + '/?acct#noprewarm');
+  await page.waitForSelector('#acct:not([hidden])');
+  ok(/2 \/ 2 free scans/.test(await page.textContent('#acct')) && await page.isVisible('#acct .dlogin'), 'free scans + login button in header', await page.textContent('#acct'));
+  await sample('sample.jar');
+  await waitState(/^scan done/);
+  ok(/2 \/ 2/.test(await page.textContent('#acct')), 'samples are free');
+  for (let i = 1; i <= 2; i++) {
+    await reset();
+    await page.setInputFiles('#file', FX + '/hide.jar');
+    await waitState(/^scan done/);
+  }
+  ok(/0 \/ 2/.test(await page.textContent('#acct')), 'two scans counted', await page.textContent('#acct'));
+  await reset();
+  await page.setInputFiles('#file', FX + '/hide.jar');
+  await page.waitForSelector('#gate:not([hidden])', { timeout: 5000 }).catch(() => {});
+  ok(await page.isVisible('#gate') && /used your 2 free scans/.test(await page.textContent('#gate')), 'third scan shows the login popup');
+  ok(await page.isVisible('#gatelogin'), 'popup has a Discord login button');
+  await page.click('#gateclose');
+  await page.click('#acct .dlogin');
+  await page.waitForSelector('#acct .who', { timeout: 10000 }).catch(() => {});
+  ok(/tester/.test(await page.textContent('#acct')) && !/free scans/.test(await page.textContent('#acct')), 'logged in: name shown, no limit', await page.textContent('#acct'));
+  ok(!/login=/.test(page.url()), 'login result removed from the address bar');
+  await reset();
+  await page.setInputFiles('#file', FX + '/hide.jar');
+  ok(!(await waitState(/^scan done/)), 'logged-in user can keep scanning');
+  await page.click('#logout');
+  await page.waitForSelector('#acct .dlogin', { timeout: 5000 }).catch(() => {});
+  ok(await page.isVisible('#acct .dlogin'), 'log out');
+  await acct('vpn');
+  await page.goto(BASE + '/?vpn#noprewarm');
+  await page.waitForSelector('#vpnbar:not([hidden])', { timeout: 5000 }).catch(() => {});
+  ok(await page.isVisible('#vpnbar') && /VPNs and proxies/.test(await page.textContent('#vpnbar')), 'VPN notice');
+  await reset();
+  await page.setInputFiles('#file', FX + '/hide.jar');
+  await page.waitForTimeout(800);
+  ok(!/hide\.jar/.test(await page.textContent('#fname').catch(() => '')), 'scanning blocked on VPN');
+  await acct('off');
 
   ok(errors.length === 0, 'no page errors', errors.slice(0, 5));
   console.log(`\n${pass} passed, ${fail} failed`);

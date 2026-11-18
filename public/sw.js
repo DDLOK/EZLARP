@@ -1,6 +1,6 @@
 // EZLARP offline support. Network first (so a new version always wins when online),
 // falling back to the last copy when offline. Files you scan are never stored here.
-const CACHE = 'ezlarp-shell-v1';
+const CACHE = 'ezlarp-shell-v2';
 const SHELL = ['/', '/style.css', '/app.js', '/ui.js', '/inspect.js', '/jview.js', '/scan.js', '/compare.js',
   '/vendor/jszip.min.js', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/favicon-32.png'];
 
@@ -17,7 +17,7 @@ self.addEventListener('fetch', e => {
   const same = url.origin === self.location.origin;
   const cdn = url.hostname === 'cdnjs.cloudflare.com';
   // skip the link downloader, big decompiler jars and the Java runtime
-  if ((!same && !cdn) || url.pathname.startsWith('/api/') || url.pathname.endsWith('.jar')) return;
+  if ((!same && !cdn) || url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/') || url.pathname.endsWith('.jar')) return;
   e.respondWith(fetch(req).then(res => {
     if (res.ok && (res.type === 'basic' || res.type === 'cors')) {
       const copy = res.clone();

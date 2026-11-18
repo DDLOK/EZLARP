@@ -4,6 +4,8 @@
 // Google Drive. Only these hosts are allowed so this can't be used as an open proxy.
 // Nothing is stored: the file streams straight through to the browser.
 
+import { config, currentUser, unseal, cookies, TICKET_COOKIE } from '../_shared/util.js';
+
 const MAX_BYTES = 150 * 1024 * 1024;
 
 const ALLOWED = [
@@ -105,7 +107,12 @@ function fileNameOf(r, url) {
   try { return decodeURIComponent(last); } catch (e) { return last; }
 }
 
-export async function onRequestGet({ request }) {
+export async function onRequestGet({ request, env = {} }) {
+  // visitors who aren't logged in need a scan ticket (from /api/scan/consume) once the free-scan limit is on
+  const cfg = config(env);
+  if (cfg.enforce && !(await currentUser(request, env)) && !(await unseal(env.SESSION_SECRET, cookies(request)[TICKET_COOKIE]))) {
+    return fail(429, `You've used your ${cfg.limit} free scans. Log in with Discord to keep scanning.`);
+  }
   const raw = new URL(request.url).searchParams.get('url') || '';
   let url;
   try {

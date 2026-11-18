@@ -82,6 +82,56 @@ Cloudflare Pages is git-connected to `main`: build command blank, output directo
 
 `.github/workflows/deploy.yml` is an alternative GitHub Actions deploy (needs `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets). Use one or the other, not both.
 
+## Accounts, free scans and VPN block
+
+Logged-out visitors get a few free scans (default 2 per 24 h per IP, IPv6 counted per /64).
+Logging in with Discord removes the limit. Login is done by the EZLARP Discord bot, which also
+adds the user to the Discord server. VPNs, proxies, hosting/datacenter IPs and Tor are blocked
+(iCloud Private Relay is allowed).
+
+Nothing is enforced until login is set up: with no secrets the site stays open, no limit, no login button.
+
+### Cloudflare Pages settings (Settings → Variables and Secrets, Production)
+
+| Name | Required | What |
+|---|---|---|
+| `AUTH_SECRET` | yes | Shared with the bot. Signs the login handoff token. 32+ random chars. |
+| `SESSION_SECRET` | yes | Signs the site's own session cookie. Different from `AUTH_SECRET`. |
+| `BOT_LOGIN_URL` | yes | The bot's login page, e.g. `https://bot.example.com/login`. |
+| `PUBLIC_ORIGIN` | no | Defaults to the request origin, e.g. `https://ezlarp.pages.dev`. |
+| `ANON_SCAN_LIMIT` | no | Free scans before login. Default `2`. |
+| `ANON_WINDOW_HOURS` | no | Window for the free scans. Default `24`. |
+| `VPN_BLOCK` | no | Set to `off` to turn the VPN block off. |
+| `PROXYCHECK_KEY` | no | proxycheck.io key for better VPN detection. |
+| `IP_SALT` | no | Extra salt for the hashed IPs kept in KV. |
+| `AUTH_AUDIENCE` | no | Expected `aud` in the bot token. Default `ezlarp`. |
+
+KV: create a namespace and bind it as `EZLARP_KV` (Settings → Bindings → KV namespace).
+Redeploy after changing settings.
+
+### Bot handoff contract
+
+1. The site sends the user to `BOT_LOGIN_URL?return=https://ezlarp.pages.dev/auth/done`.
+2. The bot runs Discord OAuth2 (`identify guilds.join`) and adds the user to the server with
+   `PUT /guilds/{guild}/members/{user}` using the bot token.
+3. The bot redirects to `<return>?token=<JWT>`, or `<return>?error=<message>` on failure.
+
+The JWT is HS256, signed with `AUTH_SECRET`:
+
+```json
+{ "sub": "<discord user id>", "name": "<display name>", "avatar": "<avatar hash or null>",
+  "joined": true, "aud": "ezlarp", "iat": 1700000000, "exp": 1700000120, "jti": "<random id>" }
+```
+
+`exp - iat` must be 600 s or less (use 120). Each `jti` works once.
+
+### Limits
+
+- Scans of local files run in the browser, so their limit is a speed bump, not a lock.
+  Scans by link go through `/api/fetch`, which checks the limit on the server.
+- VPN detection is by network (ASN), Tor exit list and optionally proxycheck.io. A few home ISPs
+  that also rent servers can be misjudged; add `VPN_BLOCK=off` if that bites.
+
 ## Tests
 
 See `tools/test/README.md`: unit tests for the parsers and scanner, and a headless-Chrome

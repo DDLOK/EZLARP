@@ -62,7 +62,7 @@ async function loadSample(name) {
     const r = await fetch('/samples/' + encodeURIComponent(name));
     // the host answers unknown paths with the home page, so check it isn't HTML
     if (!r.ok || /text\/html/.test(r.headers.get('content-type') || '')) throw new Error(`no sample called "${name}" (try jar, apk, exe or python)`);
-    handleFiles([new File([await r.blob()], name)]);
+    handleFiles([new File([await r.blob()], name)], { free: true }); // samples don't use up free scans
   } catch (e) { showError('could not load sample: ' + (e.message || e)); }
 }
 const hashSample = (/[#&]sample=([\w.-]+)/.exec(location.hash) || [])[1];
@@ -199,6 +199,7 @@ async function sha1hex(u8) {
 
 async function loadUrl(raw) {
   if (busy) { toast('busy — wait for the current file to finish'); return; }
+  if (!(await allowScan())) return;
   el.status.hidden = false;
   el.err.hidden = true;
   el.recent.hidden = true;
@@ -252,10 +253,11 @@ window.addEventListener('paste', e => {
 
 // ------------------------------------------------------------------ entry
 
-async function handleFiles(list) {
+async function handleFiles(list, opts = {}) {
   list = list.filter(Boolean);
   if (!list.length) return;
   if (busy) { toast('busy — wait for the current file to finish'); return; }
+  if (!opts.free && !(await allowScan())) return;
   stack.length = 0;
   const classes = list.filter(f => /\.class$/i.test(f.name));
   if (list.length > 1 && classes.length === list.length) {
@@ -1632,3 +1634,90 @@ if ('serviceWorker' in navigator && location.protocol === 'https:' && !navigator
 }
 // a share link pasted into this tab's address bar
 addEventListener('hashchange', () => { if (/[#&]r=/.test(location.hash)) location.reload(); });
+
+// ------------------------------------------------------------------ account + free scans
+// Login is done by the EZLARP Discord bot (/auth/login hands over to it). Visitors who aren't
+// logged in get a few free scans; samples and shared reports don't count.
+const Account = { user: null, login: false, limit: null, left: null, reset: null, vpn: false };
+const acctEl = document.getElementById('acct');
+const gateEl = document.getElementById('gate');
+const vpnBar = document.getElementById('vpnbar');
+function showVpn() {
+  Account.vpn = true;
+  vpnBar.hidden = false;
+  renderAccount();
+}
+function renderAccount() {
+  const a = Account;
+  if (a.vpn) { acctEl.hidden = true; return; }
+  if (a.user) {
+    const av = a.user.avatar ? `https://cdn.discordapp.com/avatars/${a.user.id}/${a.user.avatar}.png?size=64` : `https://cdn.discordapp.com/embed/avatars/${Number(BigInt(a.user.id) >> 22n) % 6}.png`;
+    acctEl.innerHTML = `<img class="av" src="${esc(av)}" alt="" referrerpolicy="no-referrer"><span class="who">${esc(a.user.name)}</span><button class="btn ghost sm" id="logout">log out</button>`;
+    acctEl.hidden = false;
+    document.getElementById('logout').onclick = async () => {
+      try { await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' }); } catch (e) { /* offline */ }
+      Account.user = null;
+      toast('logged out');
+      loadAccount();
+    };
+  } else if (a.login) {
+    const left = a.limit != null ? `<span class="left${a.left === 0 ? ' none' : ''}" title="free scans without logging in">${a.left} / ${a.limit} free scans</span>` : '';
+    acctEl.innerHTML = `${left}<a class="btn primary sm dlogin" href="/auth/login"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20.3 4.4A19.8 19.8 0 0 0 15.4 3l-.6 1.3a18.4 18.4 0 0 0-5.6 0L8.6 3a19.7 19.7 0 0 0-4.9 1.4C.6 9 -.3 13.5.1 18a19.9 19.9 0 0 0 6 3l1.3-2.1c-.7-.3-1.4-.6-2-1l.5-.4a14.2 14.2 0 0 0 12.2 0l.5.4c-.6.4-1.3.7-2 1L18 21a19.8 19.8 0 0 0 6-3c.5-5.2-.9-9.7-3.7-13.6ZM8 15.3c-1.2 0-2.1-1.1-2.1-2.4s.9-2.4 2.1-2.4 2.2 1.1 2.1 2.4c0 1.3-.9 2.4-2.1 2.4Zm8 0c-1.2 0-2.1-1.1-2.1-2.4s.9-2.4 2.1-2.4 2.2 1.1 2.1 2.4c0 1.3-.9 2.4-2.1 2.4Z"/></svg>Log in</a>`;
+    acctEl.hidden = false;
+  } else {
+    acctEl.hidden = true;
+  }
+  const priv = document.querySelector('.privacy');
+  if (priv && a.login && !priv.dataset.acct) {
+    priv.dataset.acct = '1';
+    priv.textContent += ` Free scans are counted with a scrambled (hashed) copy of your IP address, kept for ${a.windowHours || 24} hours. Logging in keeps your Discord id and name in a cookie on this device.`;
+  }
+}
+const accountReady = loadAccount();
+async function loadAccount() {
+  try {
+    const r = await fetch('/api/me', { credentials: 'same-origin', cache: 'no-store' });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 403 && j.reason === 'vpn') showVpn();
+    else if (r.ok) Object.assign(Account, { user: null }, j);
+  } catch (e) { /* static copy of the site, or offline: no limits */ }
+  renderAccount();
+}
+function showGate() {
+  const a = Account;
+  const hours = a.reset ? Math.max(1, Math.ceil((a.reset * 1000 - Date.now()) / 3600000)) : a.windowHours || 24;
+  document.getElementById('gatetext').textContent = `You've used your ${a.limit} free scans. They come back in about ${hours} hour${hours === 1 ? '' : 's'}.`;
+  gateEl.hidden = false;
+}
+document.getElementById('gateclose').onclick = () => { gateEl.hidden = true; };
+gateEl.onclick = e => { if (e.target === gateEl) gateEl.hidden = true; };
+// Called before every scan of the visitor's own file or link.
+async function allowScan() {
+  await accountReady;
+  if (Account.vpn) { showVpn(); toast('turn your VPN off to scan'); return false; }
+  if (Account.user || Account.limit == null) return true;
+  try {
+    const r = await fetch('/api/scan/consume', { method: 'POST', credentials: 'same-origin' });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 429) { Object.assign(Account, { left: 0, reset: j.reset || Account.reset }); renderAccount(); showGate(); return false; }
+    if (r.status === 403 && j.reason === 'vpn') { showVpn(); return false; }
+    if (r.ok) { Account.left = j.left; Account.reset = j.reset || Account.reset; renderAccount(); }
+  } catch (e) { /* can't reach the server: don't lock people out */ }
+  return true;
+}
+// coming back from the bot's login page
+(() => {
+  const p = new URLSearchParams(location.search);
+  const st = p.get('login');
+  if (!st) return;
+  const msg = {
+    ok: p.get('joined') === '0' ? 'logged in (couldn\'t add you to the Discord server)' : 'logged in · you\'re in the EZLARP Discord server',
+    error: 'login failed' + (p.get('why') ? ': ' + p.get('why') : ''),
+    vpn: 'login is blocked while you use a VPN',
+    off: 'login isn\'t set up yet',
+  }[st];
+  if (msg) setTimeout(() => toast(msg), 300);
+  if (st === 'vpn') showVpn();
+  history.replaceState(null, '', location.pathname + location.hash);
+})();
+

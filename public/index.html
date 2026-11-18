@@ -35,7 +35,9 @@
     <span class="tab active">DECOMPILER</span>
     <a class="tab" href="https://github.com/DDLOK/EZLARP" target="_blank" rel="noopener">SOURCE</a>
   </nav>
+  <div class="acct" id="acct" hidden></div>
 </header>
+<div class="vpnbar" id="vpnbar" hidden>VPNs and proxies aren't allowed on EZLARP. Turn yours off and reload the page.</div>
 
 <main class="wrap">
   <section class="hero" id="hero">
@@ -222,6 +224,14 @@
 </main>
 
 <div class="overlay" id="overlay" hidden><div>drop to analyze</div></div>
+<div class="keys" id="gate" hidden role="dialog" aria-label="Free scans used up">
+  <div class="keys-box gate-box">
+    <h3>FREE SCANS USED UP</h3>
+    <p id="gatetext">You've used your free scans.</p>
+    <p class="hint">Logging in with Discord gives you unlimited scans. It also adds you to the EZLARP Discord server (Discord asks you first).</p>
+    <div class="gate-actions"><a class="btn primary" id="gatelogin" href="/auth/login">Log in with Discord</a><button class="btn ghost" id="gateclose">not now</button></div>
+  </div>
+</div>
 <div class="keys" id="keys" hidden role="dialog" aria-label="Keyboard shortcuts">
   <div class="keys-box">
     <h3>KEYBOARD SHORTCUTS</h3>
@@ -244,7 +254,7 @@
 </div>
 <pre id="console" hidden></pre>
 
-<footer class="foot">EZLARP &middot; v0.11 &middot; Vineflower / JADX / CFR / Procyon / JD-Core on CheerpJ 5 &middot; static heuristics, not an antivirus <span class="pc-only">&middot; <button class="link" id="keysbtn">keyboard shortcuts (?)</button></span></footer>
+<footer class="foot">EZLARP &middot; v0.12 &middot; Vineflower / JADX / CFR / Procyon / JD-Core on CheerpJ 5 &middot; static heuristics, not an antivirus <span class="pc-only">&middot; <button class="link" id="keysbtn">keyboard shortcuts (?)</button></span></footer>
 <script src="/inspect.js"></script>
 <script src="/jview.js"></script>
 <script src="/scan.js"></script>
