@@ -21,7 +21,7 @@ const el = {};
 for (const id of ['drop', 'file', 'pick', 'engine', 'fallback', 'rename', 'status', 'ficon', 'verdict', 'fname', 'fsize', 'ftype',
   'fstate', 'fmd5', 'fsha1', 'fhash', 'vt', 'ftags', 'fill', 'err', 'result', 'rtabs', 'scandot', 'decall', 'retry', 'report', 'dl',
   'banner', 'q', 'qmode', 'tree', 'sidefoot', 'ftabs', 'cpath', 'cmeta', 'outline', 'openjar', 'bc', 'wrap', 'copy', 'dlone',
-  'codebox', 'gutter', 'code', 'preview', 'usages', 'qv', 'urlform', 'url', 'cmp', 'cmpfile', 'cmpview', 'recent', 'recentlist', 'clearhist', 'scan', 'details', 'sq', 'skind', 'scount', 'strings', 'logbox', 'overlay', 'console']) {
+  'codebox', 'gutter', 'code', 'preview', 'usages', 'qv', 'filesbtn', 'mfile', 'urlform', 'url', 'cmp', 'cmpfile', 'cmpview', 'recent', 'recentlist', 'clearhist', 'scan', 'details', 'sq', 'skind', 'scount', 'strings', 'logbox', 'overlay', 'console']) {
   el[id] = $(id);
 }
 
@@ -194,6 +194,7 @@ function showView(v) {
   for (const b of el.rtabs.querySelectorAll('.rtab')) b.classList.toggle('active', b.dataset.view === v);
   for (const p of el.result.querySelectorAll('.view')) p.hidden = p.dataset.view !== v;
   if (v === 'source' && S.pendingOpen) openPending();
+  if (v === 'source' && PHONE.matches && !S.current) setDrawer(true);
 }
 el.rtabs.addEventListener('click', e => {
   const b = e.target.closest('.rtab');
@@ -240,7 +241,7 @@ function renderBanner() {
   }
   const pend = pendingCount();
   if (S.lazy && pend && typeof JAVA_AUTO !== 'undefined' && !JAVA_AUTO) {
-    parts.push(`<span>Code is shown by EZLARP's built-in decompiler: instant and works on ${IS_IOS ? 'iPhone / iPad' : 'every device'}. Loops show as labels + goto. "decompile all" makes code search cover every class.</span>`);
+    parts.push(`<span>Code is shown by EZLARP's built-in decompiler: instant and works on ${IS_IOS ? 'iPhone / iPad' : 'every device'}. "decompile all" makes code search cover every class.</span>`);
   } else if (S.lazy && pend) {
     parts.push(`<span>Code shows instantly in quick view, then Vineflower's full source replaces it (${pend} classes not opened yet). Code search covers opened files; the <b>strings</b> search covers every class.</span>`);
   }
@@ -286,9 +287,34 @@ function updateFoot() {
   const py = real.filter(f => f.type === 'py').length;
   const srcCount = real.filter(f => f.type === 'src').length;
   const done = real.filter(f => f.type === 'src' && f.text != null).length;
+  const opened = real.filter(f => f.type === 'src' && (f.text != null || f.quick != null)).length;
+  const noJava = typeof JAVA_AUTO !== 'undefined' && !JAVA_AUTO;
   el.sidefoot.textContent = py ? `${py} Python modules · ${real.length - py} other` :
-    `${srcCount} sources${S.lazy ? ` (${done} decompiled)` : ''} · ${real.length - srcCount} resources`;
+    `${srcCount} sources${S.lazy ? noJava ? ` (${opened} opened)` : ` (${done} decompiled)` : ''} · ${real.length - srcCount} resources`;
+  if (el.filesbtn) el.filesbtn.textContent = `☰ Files · ${real.length}`;
 }
+const isOpened = f => f.text != null || (typeof JAVA_AUTO !== 'undefined' && !JAVA_AUTO && f.quick != null);
+
+// ---- phones: the file list is a drawer above the code
+const PHONE = matchMedia('(max-width:760px)');
+const srcView = () => el.result.querySelector('.view[data-view=source]');
+function setDrawer(open) {
+  const v = srcView();
+  if (!v) return;
+  v.classList.toggle('files-open', !!open);
+  el.filesbtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+el.filesbtn.onclick = () => {
+  const open = !srcView().classList.contains('files-open');
+  setDrawer(open);
+  if (open) setTimeout(() => el.q.focus({ preventScroll: true }), 0);
+};
+// long lines wrap on phones by default
+if (PHONE.matches) el.codebox.classList.add('wrap');
+// sticky bars sit under the site header
+const setHdr = () => document.documentElement.style.setProperty('--hdr', document.querySelector('.top').offsetHeight + 'px');
+setHdr();
+addEventListener('resize', setHdr);
 
 function renderTree() {
   el.tree.innerHTML = '';
@@ -342,7 +368,7 @@ function fileRow(path, label, depth, html) {
   const f = S.files.get(path);
   const row = document.createElement('div');
   const flag = S.srcFlags.get(path);
-  row.className = 'node' + (S.current === path ? ' active' : '') + (f.type === 'src' && f.text == null ? ' pending' : '') +
+  row.className = 'node' + (S.current === path ? ' active' : '') + (f.type === 'src' && !isOpened(f) ? ' pending' : '') +
     (flag === 'high' ? ' flag' : flag === 'med' ? ' flag-med' : '');
   row.dataset.path = path;
   row.style.paddingLeft = (8 + depth * 14) + 'px';
@@ -361,7 +387,7 @@ function markTree() {
   if (row) {
     row.classList.add('active');
     const f = S.files.get(S.current);
-    if (f && f.text != null) row.classList.remove('pending');
+    if (f && isOpened(f)) row.classList.remove('pending');
   }
 }
 
@@ -647,10 +673,17 @@ async function openFile(path, opts = {}) {
     }
   }
   f.shown = text;
+  el.mfile.textContent = path;
+  if (PHONE.matches) setDrawer(false);
   renderCode(text, lang);
   if (opts.line) scrollToLine(opts.line);
   else if (opts.find) scrollToFind(text, opts.find);
-  else if (!opts.keepScroll) el.codebox.scrollTop = 0;
+  else if (!opts.keepScroll) {
+    el.codebox.scrollTop = 0;
+    // phones: skip the package / import lines and start at the class
+    const decl = PHONE.matches && lang === 'java' && /^(?:[\w@]+ )*(?:class|interface|enum|record|@interface) /m.exec(text);
+    if (decl && countLines(text, decl.index) > 4) el.codebox.scrollTop = Math.max(0, lineTop(countLines(text, decl.index)) - 8);
+  }
 }
 
 function clearViewer() {
@@ -686,6 +719,8 @@ function showImage(f) {
 
 function renderCode(text, lang, placeholder) {
   if (!placeholder) el.codebox.classList.remove('loading');
+  // phones: 2-space indents so wrapped lines keep more room (display only; copy keeps the original)
+  if (PHONE.matches && (lang === 'java' || lang === 'python')) text = text.replace(/^(?: {4})+/gm, m => ' '.repeat(m.length / 2));
   const n = text.split('\n').length;
   let g = '';
   for (let i = 1; i <= n; i++) g += i + '\n';
@@ -736,9 +771,32 @@ el.outline.onchange = () => {
 
 function lineHeight() { return parseFloat(getComputedStyle(el.code.parentElement).lineHeight) || 19; }
 
+// y position of a line inside the code box (measured when lines wrap)
+function lineTop(line) {
+  const lh = lineHeight();
+  if (!el.codebox.classList.contains('wrap') || line <= 1) return 14 + (line - 1) * lh;
+  const box = el.codebox.getBoundingClientRect();
+  const at = (node, off) => {
+    const r = document.createRange();
+    r.setStart(node, off); r.setEnd(node, Math.min(off + 1, node.nodeValue.length));
+    return r.getBoundingClientRect().top - box.top + el.codebox.scrollTop;
+  };
+  const walker = document.createTreeWalker(el.code, NodeFilter.SHOW_TEXT);
+  let n = 1, node;
+  while ((node = walker.nextNode())) {
+    const t = node.nodeValue;
+    if (n === line && t.length) return at(node, 0);
+    for (let i = t.indexOf('\n'); i >= 0; i = t.indexOf('\n', i + 1)) {
+      n++;
+      if (n === line && i + 1 < t.length) return at(node, i + 1);
+    }
+  }
+  return 14 + (line - 1) * lh;
+}
+
 function scrollToLine(line) {
   const lh = lineHeight();
-  const top = 14 + (line - 1) * lh;
+  const top = lineTop(line);
   el.codebox.scrollTop = Math.max(0, top - el.codebox.clientHeight / 3);
   let flash = el.codebox.querySelector('.flash');
   if (!flash) {
@@ -1299,6 +1357,15 @@ window.addEventListener('keydown', e => {
   else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') { e.preventDefault(); showView('source'); setQMode('code'); el.q.select(); }
   else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's') { e.preventDefault(); showView('source'); setQMode('strings'); el.q.select(); }
   else if (e.altKey && e.key.toLowerCase() === 'w') { e.preventDefault(); if (S.current) closeTab(S.current); }
+  else if (!inField && !e.ctrlKey && !e.metaKey && !e.altKey && /^[1-4]$/.test(e.key)) {
+    const v = ['scan', 'source', 'details', 'log'][+e.key - 1];
+    const tab = el.rtabs.querySelector(`.rtab[data-view="${v}"]`);
+    if (tab && !tab.hidden) { e.preventDefault(); showView(v); }
+  }
+  else if (!inField && !e.ctrlKey && !e.metaKey && !e.altKey && /^[qbuw]$/.test(e.key)) {
+    const btn = { q: el.qv, b: el.bc, u: el.usages, w: el.wrap }[e.key];
+    if (btn && !btn.hidden && S.current) { e.preventDefault(); if (e.key !== 'w') showView('source'); btn.click(); }
+  }
   else if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && S.tabs.length > 1 && !inField) {
     e.preventDefault();
     const i = S.tabs.indexOf(S.current);
@@ -1306,6 +1373,40 @@ window.addEventListener('keydown', e => {
     openFile(n);
   }
 });
+
+// keyboard shortcut list
+const keysEl = document.getElementById('keys');
+const toggleKeys = show => { keysEl.hidden = !show; };
+document.getElementById('keysbtn').onclick = () => toggleKeys(true);
+document.getElementById('keysclose').onclick = () => toggleKeys(false);
+keysEl.onclick = e => { if (e.target === keysEl) toggleKeys(false); };
+window.addEventListener('keydown', e => {
+  const inField = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement && document.activeElement.tagName);
+  if (e.key === '?' && !inField) { e.preventDefault(); toggleKeys(keysEl.hidden); }
+  else if (e.key === 'Escape' && !keysEl.hidden) toggleKeys(false);
+});
+
+// drag the divider between the file list and the code (desktop)
+(() => {
+  const view = el.result.querySelector('.view[data-view=source]');
+  const rz = document.getElementById('resizer');
+  const KEY = 'ezlarp.sideWidth';
+  const apply = w => view.style.setProperty('--side', Math.max(180, Math.min(w, 640)) + 'px');
+  try { const w = +localStorage.getItem(KEY); if (w) apply(w); } catch (e) { /* no storage */ }
+  rz.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    rz.setPointerCapture(e.pointerId);
+    const left = view.getBoundingClientRect().left;
+    const move = ev => apply(ev.clientX - left);
+    const up = () => {
+      rz.removeEventListener('pointermove', move);
+      try { localStorage.setItem(KEY, parseInt(view.style.getPropertyValue('--side'), 10)); } catch (e2) { /* no storage */ }
+    };
+    rz.addEventListener('pointermove', move);
+    rz.addEventListener('pointerup', up, { once: true });
+  });
+  rz.addEventListener('dblclick', () => { view.style.removeProperty('--side'); try { localStorage.removeItem(KEY); } catch (e) { /* no storage */ } });
+})();
 
 // ------------------------------------------------------------------ recent scans (metadata only)
 

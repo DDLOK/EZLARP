@@ -217,9 +217,19 @@ window.addEventListener('drop', e => {
 });
 window.addEventListener('paste', e => {
   const files = e.clipboardData ? [...e.clipboardData.files] : [];
-  if (files.length && !/^(INPUT|TEXTAREA)$/.test(document.activeElement && document.activeElement.tagName)) {
+  const inField = /^(INPUT|TEXTAREA)$/.test(document.activeElement && document.activeElement.tagName);
+  if (files.length && !inField) {
     e.preventDefault();
     handleFiles(files);
+    return;
+  }
+  // a pasted link anywhere on the page scans it
+  const text = e.clipboardData ? e.clipboardData.getData('text').trim() : '';
+  if (!inField && /^https?:\/\/\S+$/.test(text) && !busy) {
+    e.preventDefault();
+    setMode('url');
+    el.url.value = text;
+    loadUrl(text);
   }
 });
 
@@ -1511,4 +1521,9 @@ async function scanNested() {
   const rz = S.jarInfo.rz;
   const items = S.jarInfo.nestedList.map(n => ({ name: n.name, size: n.size, get: () => rz.file(n.name).async('uint8array') }));
   await descend(() => analyzeBatch(items, `${S.name} · nested`));
+}
+
+// installable app + offline page (never in automated browsers, where it would bypass test routing)
+if ('serviceWorker' in navigator && location.protocol === 'https:' && !navigator.webdriver) {
+  addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
 }

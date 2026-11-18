@@ -37,7 +37,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   const drop = async file => { await reset(); await page.setInputFiles('#file', Array.isArray(file) ? file.map(f => path.join(FX, f)) : path.join(FX, file)); };
   const code = () => page.textContent('#code');
   const waitCode = (re, ms = 60000) => page.waitForFunction(r => new RegExp(r).test(document.getElementById('code').textContent), re.source, { timeout: ms }).then(() => true, () => false);
-  const waitFull = (ms = 120000) => page.waitForFunction(() => { const f = S.files.get(S.current); return f && f.text != null && !/Quick view/.test(el.code.textContent); }, null, { timeout: ms }).then(() => true, () => false);
+  const waitFull = (ms = 120000) => page.waitForFunction(() => { const f = S.files.get(S.current); return f && f.text != null && !/quick view/i.test(el.code.textContent); }, null, { timeout: ms }).then(() => true, () => false);
   const shot = n => page.screenshot({ path: `${SHOTS}/${n}.png` });
 
   // classic mode: small files decompile fully up front (#lazy=150), so the source-view tests below apply
@@ -428,9 +428,18 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
     await ip.click('.rtab[data-view=source]');
     const t0 = Date.now();
     await ip.waitForFunction(() => /class ExampleMod/.test(el.code.textContent), null, { timeout: 5000 }).catch(() => {});
-    ok(/Quick view/.test(await ip.textContent('#code')) && /class ExampleMod/.test(await ip.textContent('#code')), 'iphone: quick view shows code', (await ip.textContent('#code')).slice(0, 200));
+    ok(/quick view/i.test(await ip.textContent('#code')) && /class ExampleMod/.test(await ip.textContent('#code')), 'iphone: quick view shows code', (await ip.textContent('#code')).slice(0, 200));
     ok(Date.now() - t0 < 3000, 'iphone: code in under 3 s', Date.now() - t0);
     ok(/quick view/.test(await ip.textContent('#cmeta')) && (await ip.textContent('#qv')) === 'full source', 'iphone: quick meta + full-source button');
+    ok(/try \{[\s\S]*\} catch \(IOException \w+\) \{/.test(await ip.textContent('#code')) && /^import java\.nio\.file\.Path;$/m.test(await ip.textContent('#code')), 'iphone: try/catch + imports rebuilt');
+    ok(/while \(\w+\.hasNext\(\)\) \{/.test(await ip.textContent('#code')), 'iphone: loops rebuilt');
+    ok(await ip.evaluate(() => el.codebox.classList.contains('wrap')), 'iphone: lines wrap by default');
+    ok(await ip.isVisible('#filesbtn') && !(await ip.isVisible('#tree')), 'iphone: code first, files in a drawer');
+    await ip.click('#filesbtn');
+    ok(await ip.isVisible('#tree') && !(await ip.isVisible('#codebox')), 'iphone: drawer opens');
+    await ip.click('#tree .node[data-path="demo/mod/Config.java"]');
+    ok(!(await ip.isVisible('#tree')) && await ip.isVisible('#codebox') && /class Config/.test(await ip.textContent('#code')), 'iphone: picking a file closes the drawer');
+    await ip.evaluate(() => openFile('demo/mod/ExampleMod.java'));
     await ip.evaluate(() => openFile('demo/mod/ScanDemo.java'));
     await ip.waitForFunction(() => /getAccessToken/.test(el.code.textContent), null, { timeout: 5000 }).catch(() => {});
     ok(/discord\.com\/api\/webhooks/.test(await ip.textContent('#code')) && /getAccessToken\(\)/.test(await ip.textContent('#code')), 'iphone: strings + calls visible');
@@ -458,7 +467,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
     await hp.waitForFunction(() => /^scan done/.test(el.fstate.textContent), null, { timeout: 60000 });
     await hp.click('.rtab[data-view=source]');
     await hp.waitForFunction(() => /class ExampleMod/.test(el.code.textContent), null, { timeout: 5000 }).catch(() => {});
-    ok(/Quick view/.test(await hp.textContent('#code')), 'hang: quick view while the engine loads');
+    ok(/quick view/i.test(await hp.textContent('#code')), 'hang: quick view while the engine loads');
     await hp.waitForFunction(() => /did not start within 3 seconds/.test(el.code.textContent), null, { timeout: 15000 }).catch(() => {});
     ok(/did not start within 3 seconds/.test(await hp.textContent('#code')) && /class ExampleMod/.test(await hp.textContent('#code')), 'hang: timeout message, code still shown', (await hp.textContent('#code')).slice(0, 300));
     await hctx.close();
@@ -471,11 +480,38 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await waitState(/^scan done/);
   await page.click('.rtab[data-view=source]');
   ok(await waitFull(), 'full source replaces quick view');
-  ok(!/Quick view/.test(await code()) && (await page.textContent('#qv')) === 'quick view', 'toggle offers quick view');
+  ok(!/quick view/i.test(await code()) && (await page.textContent('#qv')) === 'quick view', 'toggle offers quick view');
   await page.click('#qv');
-  ok(/Quick view/.test(await code()), 'toggle to quick view');
+  ok(/quick view/i.test(await code()), 'toggle to quick view');
   await page.click('#qv');
-  ok(!/Quick view/.test(await code()), 'toggle back to full');
+  ok(!/quick view/i.test(await code()), 'toggle back to full');
+
+  // ---------------- desktop extras: shortcuts, resizer, manifest, paste-to-scan
+  console.log('desktop extras');
+  await page.goto(BASE + '/?extras#noprewarm');
+  ok(await page.isVisible('#features'), 'landing feature cards');
+  const man = await page.evaluate(async () => (await fetch('/manifest.webmanifest')).json());
+  ok(man.short_name === 'EZLARP' && man.icons.length === 3, 'web app manifest');
+  ok(await page.evaluate(async () => (await fetch('/icons/og.png')).ok), 'share image');
+  await sample('sample.jar');
+  await waitState(/^scan done/);
+  ok(!(await page.isVisible('#features')), 'feature cards hidden with a result');
+  await page.keyboard.press('2');
+  ok(await page.$eval('.rtab.active', e => e.dataset.view) === 'source', 'key 2 opens CODE');
+  await page.keyboard.press('3');
+  ok(await page.$eval('.rtab.active', e => e.dataset.view) === 'details', 'key 3 opens DETAILS');
+  await page.keyboard.press('?');
+  ok(await page.isVisible('#keys'), '? shows shortcuts');
+  await page.keyboard.press('Escape');
+  ok(!(await page.isVisible('#keys')), 'Esc closes shortcuts');
+  await page.keyboard.press('2');
+  const rz = await page.$('#resizer');
+  const box = await rz.boundingBox();
+  await page.mouse.move(box.x + 2, box.y + 100); await page.mouse.down(); await page.mouse.move(box.x + 122, box.y + 100, { steps: 4 }); await page.mouse.up();
+  const sideW = await page.$eval('.side', e => e.getBoundingClientRect().width);
+  ok(sideW > 360 && sideW < 440, 'resizer widens the file list', sideW);
+  await page.evaluate(() => { const dt = new DataTransfer(); dt.setData('text/plain', 'https://cdn.discordapp.com/attachments/1/2/sample.apk'); document.body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true })); });
+  ok(!(await waitState(/^(scan done|done)/)) && /sample\.apk/.test(await page.textContent('#fname')), 'pasting a link scans it', await state());
 
   ok(errors.length === 0, 'no page errors', errors.slice(0, 5));
   console.log(`\n${pass} passed, ${fail} failed`);

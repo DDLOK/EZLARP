@@ -6,6 +6,23 @@
 <title>EZLARP &mdash; jar / apk / exe decompiler &amp; scanner</title>
 <meta name="description" content="Malware scanner and decompiler for Minecraft mods, jars, APKs and EXEs. Instant verdict, then read the code. Files never leave your browser.">
 <meta name="theme-color" content="#0a0a0a">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="EZLARP">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="EZLARP">
+<meta property="og:title" content="EZLARP — malware scanner &amp; decompiler for Minecraft mods">
+<meta property="og:description" content="Drop a .jar, .apk or .exe: verdict in seconds, named detections (session stealers, token grabbers, fractureiser), then read the code. Files never leave your browser.">
+<meta property="og:url" content="https://ezlarp.pages.dev/">
+<meta property="og:image" content="https://ezlarp.pages.dev/icons/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://ezlarp.pages.dev/icons/og.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0a'/%3E%3Cpath d='M9 9h14v3H12.5v2.6H21v3h-8.5V20H23v3H9z' fill='%237af0a1'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
 <script src="/vendor/jszip.min.js"></script>
@@ -68,6 +85,25 @@
   </section>
   <p class="privacy">Files you choose are scanned inside your browser and never uploaded. Links are downloaded by EZLARP's server and passed straight to your browser; nothing is kept.</p>
 
+  <section class="features" id="features" aria-label="What EZLARP checks">
+    <div class="feat">
+      <h4>Stealers</h4>
+      <p>Minecraft session tokens, Discord tokens, browser passwords and crypto wallets, flagged when they're sent to a webhook or Telegram bot.</p>
+    </div>
+    <div class="feat">
+      <h4>Known malware</h4>
+      <p>Signatures for fractureiser and Skyrage, plus droppers that download and install programs.</p>
+    </div>
+    <div class="feat">
+      <h4>Hidden tricks</h4>
+      <p>Base64 / hex / reversed strings decoded, byte arrays spelled out, runtime class loading, native code, obfuscators.</p>
+    </div>
+    <div class="feat">
+      <h4>Read the code</h4>
+      <p>Built-in decompiler opens any class instantly on phone or PC; Vineflower and CFR give full source on computers.</p>
+    </div>
+  </section>
+
   <section class="card recent" id="recent" hidden>
     <div class="recent-head"><h3>RECENT SCANS</h3><span class="meta">names and results only, kept in this browser · files are never stored</span><button class="link" id="clearhist">clear</button></div>
     <div id="recentlist"></div>
@@ -112,6 +148,10 @@
     <div class="banner" id="banner" hidden></div>
 
     <div class="view" data-view="source">
+      <div class="mbar">
+        <button class="btn ghost sm" id="filesbtn" type="button" aria-expanded="false">☰ Files</button>
+        <span class="mfile" id="mfile"></span>
+      </div>
       <aside class="side">
         <div class="search">
           <input id="q" type="search" placeholder="filter files" autocomplete="off" spellcheck="false">
@@ -124,6 +164,7 @@
         <div class="tree" id="tree"></div>
         <div class="side-foot" id="sidefoot"></div>
       </aside>
+      <div class="resizer" id="resizer" title="Drag to resize · double-click to reset" aria-hidden="true"></div>
       <div class="pane">
         <div class="ftabs" id="ftabs"></div>
         <div class="pane-head">
@@ -173,9 +214,29 @@
 </main>
 
 <div class="overlay" id="overlay" hidden><div>drop to analyze</div></div>
+<div class="keys" id="keys" hidden role="dialog" aria-label="Keyboard shortcuts">
+  <div class="keys-box">
+    <h3>KEYBOARD SHORTCUTS</h3>
+    <dl>
+      <dt><kbd>1</kbd>–<kbd>4</kbd></dt><dd>report · code · details · log</dd>
+      <dt><kbd>/</kbd></dt><dd>find a file</dd>
+      <dt><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>F</kbd></dt><dd>search code</dd>
+      <dt><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>S</kbd></dt><dd>search strings in every class</dd>
+      <dt><kbd>q</kbd></dt><dd>quick view ↔ full source</dd>
+      <dt><kbd>b</kbd></dt><dd>bytecode</dd>
+      <dt><kbd>u</kbd></dt><dd>who uses this class</dd>
+      <dt><kbd>w</kbd></dt><dd>wrap long lines</dd>
+      <dt><kbd>Alt</kbd> <kbd>←</kbd> <kbd>→</kbd></dt><dd>previous / next tab</dd>
+      <dt><kbd>Alt</kbd> <kbd>W</kbd></dt><dd>close tab</dd>
+      <dt><kbd>Ctrl</kbd> <kbd>V</kbd></dt><dd>paste a link anywhere to scan it</dd>
+      <dt><kbd>?</kbd></dt><dd>this list</dd>
+    </dl>
+    <button class="btn ghost sm" id="keysclose">close</button>
+  </div>
+</div>
 <pre id="console" hidden></pre>
 
-<footer class="foot">EZLARP &middot; v0.8 &middot; Vineflower 1.12.0 / CFR 0.152 / dex2jar 2.4 on CheerpJ 5 &middot; static heuristics, not an antivirus</footer>
+<footer class="foot">EZLARP &middot; v0.9 &middot; Vineflower 1.12.0 / CFR 0.152 / dex2jar 2.4 on CheerpJ 5 &middot; static heuristics, not an antivirus <span class="pc-only">&middot; <button class="link" id="keysbtn">keyboard shortcuts (?)</button></span></footer>
 <script src="/inspect.js"></script>
 <script src="/jview.js"></script>
 <script src="/scan.js"></script>

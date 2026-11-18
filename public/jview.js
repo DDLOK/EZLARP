@@ -1,6 +1,6 @@
 // EZLARP quick decompiler: turns .class bytecode into readable Java-like code in plain
-// JavaScript, with no Java runtime. Control flow is shown as labels and gotos instead of
-// loops, but every call, string, field and constant is there, so it works everywhere
+// JavaScript, with no Java runtime. if/else, loops, &&/||, ternaries and try/catch are
+// rebuilt from the bytecode (anything unusual stays a labelled goto), so it works everywhere
 // (including iPhone, where the in-browser JVM doesn't start) and opens instantly.
 'use strict';
 
@@ -97,14 +97,30 @@ const JView = (() => {
 
   // ------------------------------------------------------------ types
 
-  let ctx = { pkg: '' }; // current class, for shortening names
+  let ctx = { pkg: '', refs: new Set(), simple: new Set() }; // current class, for shortening names
   function jname(internal) {
     if (!internal) return '?';
     if (internal[0] === '[') return typeOf(internal);
-    const dotted = internal.replace(/\//g, '.');
     const pkg = internal.lastIndexOf('/') >= 0 ? internal.slice(0, internal.lastIndexOf('/')) : '';
-    if (pkg === 'java/lang' || pkg === ctx.pkg) return internal.slice(internal.lastIndexOf('/') + 1).replace(/\$/g, '.');
-    return dotted.replace(/\$/g, '.');
+    const local = internal.slice(internal.lastIndexOf('/') + 1);
+    if (pkg === 'java/lang' || pkg === ctx.pkg) { ctx.simple.add(local.split('$')[0]); return local.replace(/\$/g, '.'); }
+    if (!pkg) return local.replace(/\$/g, '.');
+    ctx.refs.add(pkg + '/' + local.split('$')[0]);
+    return '\u0001' + internal + '\u0001'; // resolved to a short name + import later
+  }
+  // decide imports for a whole file and replace the markers
+  function resolveNames(text, refs, simple) {
+    const bySimple = new Map();
+    for (const r of refs) { const sn = r.slice(r.lastIndexOf('/') + 1); if (!bySimple.has(sn)) bySimple.set(sn, []); bySimple.get(sn).push(r); }
+    const imported = new Set();
+    for (const [sn, list] of bySimple) if (list.length === 1 && !simple.has(sn) && /^[A-Za-z_$][\w$]*$/.test(sn)) imported.add(list[0]);
+    const out = text.replace(/\u0001([^\u0001]+)\u0001/g, (_, internal) => {
+      const top = internal.split('$')[0];
+      if (imported.has(top)) return internal.slice(internal.lastIndexOf('/') + 1).replace(/\$/g, '.');
+      return internal.replace(/\//g, '.').replace(/\$/g, '.');
+    });
+    const imports = [...imported].map(r => r.replace(/\//g, '.')).sort();
+    return { text: out, imports };
   }
   const PRIM = { B: 'byte', C: 'char', D: 'double', F: 'float', I: 'int', J: 'long', S: 'short', Z: 'boolean', V: 'void' };
   function readType(d, i) {
@@ -242,7 +258,11 @@ const JView = (() => {
 
     // names: LocalVariableTable when present (often stripped), else p1.. for params, v1.. for locals
     const names = new Map();
-    if (code.lvt) for (const v of code.lvt) if (/^[A-Za-z_$][\w$]*$/.test(v.name) && !names.has(v.idx)) names.set(v.idx, v.name);
+    const slotType = new Map(); // known declared types (params, LocalVariableTable)
+    if (code.lvt) for (const v of code.lvt) {
+      if (/^[A-Za-z_$][\w$]*$/.test(v.name) && !names.has(v.idx)) names.set(v.idx, v.name);
+      if (v.desc && !slotType.has(v.idx)) { try { slotType.set(v.idx, typeOf(v.desc)); } catch (e) { /* ignore */ } }
+    }
     const paramSlots = new Set();
     let slot = 0;
     if (!isStatic) { names.set(0, 'this'); paramSlots.add(0); slot = 1; }
@@ -251,23 +271,25 @@ const JView = (() => {
       if (!names.has(slot) || names.get(slot) === 'this') names.set(slot, 'p' + (i + 1));
       params.push(`${t} ${names.get(slot)}`);
       paramSlots.add(slot);
+      slotType.set(slot, t);
       slot += wide(t) ? 2 : 1;
     });
     const nm = i => names.get(i) || 'v' + i;
-    const declared = new Set(paramSlots);
+    const declared = new Map([...paramSlots].map(sl => [sl, slotType.get(sl) || 'Object'])); // slot -> declared type
 
     // labels for branch targets and handlers
     const targets = new Set();
     for (const x of ins) { if (x.t !== undefined) targets.add(x.t); if (x.cases) { x.cases.forEach(cc => targets.add(cc[1])); targets.add(x.def); } }
     const handlers = new Map();
-    for (const h of code.exc) { targets.add(h.handler); handlers.set(h.handler, h.type); targets.add(h.start); }
+    for (const h of code.exc) { targets.add(h.handler); handlers.set(h.handler, h.type); targets.add(h.start); if (h.end < code.bytes.length) targets.add(h.end); }
     const labelOf = new Map();
     [...targets].sort((a, b) => a - b).forEach((pc, i) => labelOf.set(pc, 'L' + (i + 1)));
     const L = pc => labelOf.get(pc) || 'L?' + pc;
 
-    const lines = [];
-    const emit = s => lines.push(ind + s);
-    for (const h of code.exc) emit(`// try ${L(h.start)}..${labelOf.get(h.end) || 'end'} catch (${h.type ? jname(h.type) : 'any'}) -> ${L(h.handler)}`);
+    const items = [];            // statements, labels and jumps; structured into if/while afterwards
+    const emit = s => items.push({ k: 's', s });
+    const external = new Set();  // labels used by try/catch: always printed, never moved into a block
+    for (const h of code.exc) { items.push({ k: 'try', h }); external.add(h.start); external.add(h.handler); if (labelOf.has(h.end)) external.add(h.end); }
 
     let st = [];
     const pop = () => st.length ? st.pop() : E('?', '?');
@@ -296,7 +318,7 @@ const JView = (() => {
           spills.get(x.pc).forEach((n, i) => emit(`${n} = ${st[i].s};`));
           st = spills.get(x.pc).map((n, i) => E(n, st[i].t));
         }
-        lines.push(ind.slice(2) + L(x.pc) + ':');
+        items.push({ k: 'l', pc: x.pc });
       } else if (dead) { continue; }
       dead = false;
 
@@ -320,7 +342,9 @@ const JView = (() => {
       }
       if ((op >= 21 && op <= 25) || (op >= 26 && op <= 45)) {
         const idx = op <= 25 ? x.idx : (op - 26) % 4;
-        const t = T_LOAD[op <= 25 ? op - 21 : Math.floor((op - 26) / 4)];
+        let t = T_LOAD[op <= 25 ? op - 21 : Math.floor((op - 26) / 4)];
+        const st0 = slotType.get(idx);
+        if (st0 && (!t || (t === 'int' && /^(boolean|char|byte|short)$/.test(st0)))) t = st0;
         push(E(nm(idx), t || 'Object'));
         continue;
       }
@@ -329,8 +353,13 @@ const JView = (() => {
         const idx = op <= 58 ? x.idx : (op - 59) % 4;
         let t = T_LOAD[op <= 58 ? op - 54 : Math.floor((op - 59) / 4)];
         const v = pop();
+        const st1 = slotType.get(idx);
+        if (st1 && (!t || (t === 'int' && /^(boolean|char|byte|short)$/.test(st1)))) t = st1;
         if (!t) t = v.t && v.t !== 'null' && v.t !== '?' ? v.t : 'Object';
-        if (!declared.has(idx)) { declared.add(idx); emit(`${t} ${nm(idx)} = ${as(v, t).s};`); } else emit(`${nm(idx)} = ${as(v, t).s};`);
+        const was = declared.get(idx);
+        // slots get reused for other variables: a new type means a new declaration
+        const retyped = was && !paramSlots.has(idx) && was !== t && t !== 'Object' && was !== 'Object' && !(was === 'int' && /^(boolean|char|byte|short)$/.test(t));
+        if (!was || retyped) { declared.set(idx, t); emit(`${t} ${nm(idx)} = ${as(v, t).s};`); } else emit(`${nm(idx)} = ${as(v, t).s};`);
         continue;
       }
       if (op >= 79 && op <= 86) {
@@ -369,21 +398,23 @@ const JView = (() => {
       if (op >= 148 && op <= 152) { const b = pop(), a = pop(); push(E('cmp', 'int', 100, { cmp: [a, b] })); continue; }
       if ((op >= 153 && op <= 166) || op === 198 || op === 199) {
         let cond;
+        const cmpc = (l, sym, r) => ({ s: `${l} ${sym} ${r}`, n: `${l} ${NEG[sym]} ${r}` });
         if (op >= 153 && op <= 158) {
           const a = pop(), sym = CMP[op - 153];
-          if (a.cmp) cond = `${paren(a.cmp[0], 50)} ${sym} ${paren(a.cmp[1], 51)}`;
-          else if (a.t === 'boolean' && (sym === '==' || sym === '!=')) cond = sym === '==' ? '!' + paren(a, 90) : a.s;
-          else cond = `${paren(a, 50)} ${sym} 0`;
+          if (a.cmp) cond = cmpc(paren(a.cmp[0], 50), sym, paren(a.cmp[1], 51));
+          else if ((a.t === 'boolean') && (sym === '==' || sym === '!=')) cond = sym === '==' ? { s: '!' + paren(a, 90), n: a.s } : { s: a.s, n: '!' + paren(a, 90) };
+          else if (a.p === 50 && / instanceof /.test(a.s) && (sym === '==' || sym === '!=')) cond = sym === '!=' ? { s: a.s, n: `!(${a.s})` } : { s: `!(${a.s})`, n: a.s };
+          else cond = cmpc(paren(a, 50), sym, '0');
         } else if (op >= 159 && op <= 166) {
           const b = pop(), a = pop();
-          cond = `${paren(a, 50)} ${CMP[(op - 159) % 6]} ${paren(as(b, a.t), 51)}`;
+          cond = cmpc(paren(a, 50), CMP[(op - 159) % 6], paren(as(b, a.t), 51));
         } else {
           const a = pop();
-          cond = `${paren(a, 50)} ${op === 198 ? '==' : '!='} null`;
+          cond = cmpc(paren(a, 50), op === 198 ? '==' : '!=', 'null');
         }
         flushSide();
         branchTo(x.t);
-        emit(`if (${cond}) goto ${L(x.t)};`);
+        items.push({ k: 'if', c: cond, t: x.t });
         continue;
       }
       if (op === 167 || op === 200) {
@@ -394,7 +425,7 @@ const JView = (() => {
           else st.forEach((e, i) => emit(`${sp[i]} = ${e.s};`));
           st = [];
         } else branchTo(x.t);
-        emit(`goto ${L(x.t)};`);
+        items.push({ k: 'go', t: x.t });
         dead = true;
         continue;
       }
@@ -402,11 +433,9 @@ const JView = (() => {
       if (op === 170 || op === 171) {
         const v = pop();
         flushSide();
-        emit(`switch (${v.s}) {`);
-        for (const [k2, t] of x.cases) { branchTo(t); emit(`  case ${k2}: goto ${L(t)};`); }
+        for (const [, t] of x.cases) branchTo(t);
         branchTo(x.def);
-        emit(`  default: goto ${L(x.def)};`);
-        emit('}');
+        items.push({ k: 'sw', v: v.s, cases: x.cases, def: x.def });
         dead = true;
         continue;
       }
@@ -512,8 +541,330 @@ const JView = (() => {
       emit(`/* ${OPNAMES[op] || 'op ' + op} */`);
     }
     for (const e of st) if (e.side) emit(e.s + ';');
-    out.push(...lines);
+    out.push(...structure(items, ind, external));
     return params;
+  }
+
+  // ------------------------------------------------------------ control flow
+
+  // Rebuilds if / else / while / do-while from labels and jumps. Anything that doesn't fit
+  // a clean shape stays as a goto, so the output is always faithful.
+  const NOTC = c => ({ s: c.n, n: c.s, op: c.op === 'and' ? 'or' : c.op === 'or' ? 'and' : null });
+  const wrapC = (c, op, side) => (c.op && c.op !== op ? `(${c[side]})` : c[side]);
+  const OR = (a, b) => ({ s: `${wrapC(a, 'or', 's')} || ${wrapC(b, 'or', 's')}`, n: `${wrapC(NOTC(a), 'and', 's')} && ${wrapC(NOTC(b), 'and', 's')}`, op: 'or' });
+  const AND = (a, b) => ({ s: `${wrapC(a, 'and', 's')} && ${wrapC(b, 'and', 's')}`, n: `${wrapC(NOTC(a), 'or', 's')} || ${wrapC(NOTC(b), 'or', 's')}`, op: 'and' });
+
+  // `if (a) goto T; if (b) goto T;` -> `if (a || b) goto T;`
+  // `if (a) goto S; if (b) goto T; S:` -> `if (!a && b) goto T;`
+  function mergeConditions(items, external) {
+    for (let changed = true, guard = 0; changed && guard < 200; guard++) {
+      changed = false;
+      const count = new Map();
+      for (const it of items) {
+        if (it.k === 'if' || it.k === 'go') count.set(it.t, (count.get(it.t) || 0) + 1);
+        else if (it.k === 'sw') { it.cases.forEach(c => count.set(c[1], (count.get(c[1]) || 0) + 1)); count.set(it.def, (count.get(it.def) || 0) + 1); }
+      }
+      for (let i = 0; i + 1 < items.length; i++) {
+        const a = items[i], b = items[i + 1];
+        if (a.k !== 'if' || b.k !== 'if') continue;
+        if (a.t === b.t) { items.splice(i, 2, { k: 'if', c: OR(a.c, b.c), t: a.t }); changed = true; break; }
+        const nx = items[i + 2];
+        if (nx && nx.k === 'l' && nx.pc === a.t && count.get(a.t) === 1 && !external.has(a.t)) {
+          items.splice(i, 2, { k: 'if', c: AND(NOTC(a.c), b.c), t: b.t }); changed = true; break;
+        }
+      }
+    }
+  }
+
+  // Cosmetic passes over structured output: inline temporaries, else-if chains, booleans.
+  function tidy(out, used) {
+    for (let i = out.length - 1; i >= 0; i--) if (out[i].label !== undefined && !used.has(out[i].label)) out.splice(i, 1);
+    const isStmt = o => o && o.s !== undefined && o.to === undefined && o.label === undefined && !o.tr;
+    // 1. `T $s0 = E;` followed by a line that is the only use of $s0 -> substitute
+    const text = out.map(o => (o.s || '') + ' ');
+    for (let i = 0; i + 1 < out.length; i++) {
+      const o = out[i], nx = out[i + 1];
+      if (!isStmt(o) || !isStmt(nx) || o.d !== nx.d) continue;
+      const m = /^(?:[\w.$<>\[\]\u0001\/]+ )?(\$s\d+) = (.*);$/.exec(o.s);
+      if (!m) continue;
+      const re = new RegExp('\\' + m[1] + '(?![\\w$])', 'g');
+      const total = text.reduce((n, t) => n + (t.match(re) || []).length, 0);
+      if (total !== 2 || (nx.s.match(re) || []).length !== 1) continue;
+      let val = m[2];
+      if (/^(boolean) [\w$]+ = \$s\d+;$/.test(nx.s) || / = \$s\d+;$/.test(nx.s)) {
+        const bm = /^boolean /.test(nx.s) && /^(\(.*\)|[^?]+) \? ([01]) : ([01])$/.exec(val);
+        if (bm && bm[2] !== bm[3]) val = bm[2] === '1' ? bm[1] : `!${/^\(.*\)$/.test(bm[1]) ? bm[1] : '(' + bm[1] + ')'}`;
+      } else if (/ \? /.test(val)) val = `(${val})`;
+      nx.s = nx.s.replace(re, () => val);
+      out.splice(i, 1); text.splice(i, 1);
+      i--;
+    }
+    // 2. `} else {` + lone `if (...) {` chain -> `} else if (...) {`
+    for (let i = 0; i < out.length; i++) {
+      const o = out[i];
+      if (o.s !== '} else {' || o.label !== undefined) continue;
+      const nx = out[i + 1];
+      if (!nx || nx.d !== o.d + 1 || !/^if \(.*\) \{$/.test(nx.s || '')) continue;
+      // find the closing brace of the else block
+      let end = -1;
+      for (let j = i + 1; j < out.length; j++) { if (out[j].d <= o.d) { end = j; break; } }
+      if (end < 0 || out[end].s !== '}' || out[end].d !== o.d) continue;
+      // inside: only the if chain at depth d+1 (its `}` / `} else {` lines) plus deeper lines
+      let ok = true, closedAt = -1;
+      for (let j = i + 2; j < end; j++) {
+        const q = out[j];
+        if (q.d > o.d + 1) continue;
+        if (q.d === o.d + 1 && (q.s === '} else {' || /^\} else if \(.*\) \{$/.test(q.s || ''))) continue;
+        if (q.d === o.d + 1 && q.s === '}' && j === end - 1) { closedAt = j; continue; }
+        ok = false; break;
+      }
+      if (!ok || closedAt < 0) continue;
+      o.s = '} else ' + nx.s;
+      out.splice(end, 1);
+      for (let j = i + 2; j <= closedAt; j++) out[j].d--;
+      out.splice(i + 1, 1);
+    }
+    // 3. declarations inside a block but used after it: declare at the top of the method
+    const hoist = [];
+    for (let i = 0; i < out.length; i++) {
+      const o = out[i];
+      if (!isStmt(o) || o.d === 0) continue;
+      const m = /^([\w.$<>\[\]\u0001\/]+) ([A-Za-z_$][\w$]*) = /.exec(o.s);
+      if (!m || /^(return|throw|new|else|case)$/.test(m[1])) continue;
+      const re = new RegExp('(?<![\\w$.])' + m[2].replace(/\$/g, '\\$') + '(?![\\w$])');
+      let end = out.length;
+      for (let j = i + 1; j < out.length; j++) if (out[j].d < o.d) { end = j; break; }
+      let outside = false;
+      for (let j = end; j < out.length && !outside; j++) if (out[j].s && re.test(out[j].s)) outside = true;
+      if (!outside) continue;
+      if (!hoist.some(h => h[1] === m[2])) hoist.push([m[1], m[2]]);
+      o.s = o.s.slice(m[1].length + 1);
+      // later "T v = ..." of the same variable become plain assignments
+      for (let j = i + 1; j < out.length; j++) if (out[j].s && out[j].s.startsWith(m[1] + ' ' + m[2] + ' = ')) out[j].s = out[j].s.slice(m[1].length + 1);
+    }
+    if (hoist.length) {
+      const at = out.length && out[0].d === 0 && /^(super|this)\(.*\);$/.test(out[0].s || '') ? 1 : 0;
+      out.splice(at, 0, ...hoist.map(h => ({ d: 0, s: `${h[0]} ${h[1]};` })));
+    }
+    // 4. trailing `return;` at the end of a void method
+    const last = out[out.length - 1];
+    if (last && last.d === 0 && last.s === 'return;') out.pop();
+  }
+
+  function structure(items, ind, external) {
+    const original = items.slice();
+    // try/catch ranges, grouped by protected range
+    const groups = [];
+    for (const it of items) if (it.k === 'try') {
+      let g = groups.find(x => x.start === it.h.start && x.end === it.h.end);
+      if (!g) groups.push(g = { start: it.h.start, end: it.h.end, handlers: [] });
+      if (!g.handlers.some(h => h.handler === it.h.handler)) g.handlers.push(it.h);
+    }
+    groups.forEach(g => g.handlers.sort((a, b) => a.handler - b.handler));
+    items = items.filter(it => it.k !== 'try');
+    const groupsOf = new Map(); // label pc -> groups it belongs to
+    for (const g of groups) for (const pc of [g.start, g.end, ...g.handlers.map(h => h.handler)]) { if (!groupsOf.has(pc)) groupsOf.set(pc, []); groupsOf.get(pc).push(g); }
+    mergeConditions(items, external);
+    const labelAt = new Map();
+    items.forEach((it, i) => { if (it.k === 'l') labelAt.set(it.pc, i); });
+    const refs = new Map(); // label pc -> indices of jumps to it
+    const addRef = (pc, i) => { if (!refs.has(pc)) refs.set(pc, []); refs.get(pc).push(i); };
+    items.forEach((it, i) => {
+      if (it.k === 'if' || it.k === 'go') addRef(it.t, i);
+      else if (it.k === 'sw') { it.cases.forEach(c => addRef(c[1], i)); addRef(it.def, i); }
+    });
+    // no label in [a, b) may be entered from outside [lo, hi)
+    const inside = (pc, a, b) => { const j = labelAt.get(pc); return j !== undefined && j >= a && j < b; };
+    const closed = (a, b, lo = a, hi = b) => {
+      for (let i = a; i < b; i++) {
+        const it = items[i];
+        if (it.k !== 'l') continue;
+        // a try/catch label is fine when its whole try statement is inside the block
+        if (external.has(it.pc) && !(groupsOf.get(it.pc) || []).every(g => inside(g.start, a, b) && g.handlers.every(h => inside(h.handler, a, b)) && (labelAt.get(g.end) === undefined || inside(g.end, a, b)))) return false;
+        for (const r of refs.get(it.pc) || []) if (r < lo || r >= hi) return false;
+      }
+      return true;
+    };
+    const used = new Set();
+    const out = []; // { d: depth, s } or { d, label: pc }
+    const nStmts = items.filter(it => it.k === 's').length;
+    let seen = 0;
+
+    function walk(lo, hi, d, loop) {
+      for (let i = lo; i < hi;) {
+        const it = items[i];
+        if (it.k === 's') { out.push({ d, s: it.s }); seen++; i++; continue; }
+        if (it.k === 'l' && groupsOf.has(it.pc)) {
+          const nx = tryBlock(i, hi, d, loop);
+          if (nx >= 0) { i = nx; continue; }
+        }
+        if (it.k === 'l') {
+          // loop: a later jump back to this label
+          const back = (refs.get(it.pc) || []).filter(j => j > i && j < hi);
+          if (back.length) {
+            const b = Math.max(...back);
+            const last = items[b];
+            const exitIdx = b + 1 < items.length && items[b + 1].k === 'l' ? b + 1 : -1;
+            if ((last.k === 'go' || last.k === 'if') && last.t === it.pc && closed(i + 1, b + 1, i, b + 1)) {
+              if (external.has(it.pc) || (refs.get(it.pc) || []).some(r => r < i || r > b)) out.push({ d, label: it.pc });
+              const lp = { head: it.pc, exit: exitIdx >= 0 ? items[exitIdx].pc : null };
+              if (last.k === 'go') {
+                let start = i + 1, head = 'while (true) {';
+                const first = items[start];
+                if (first && first.k === 'if' && lp.exit !== null && first.t === lp.exit) { head = `while (${first.c.n}) {`; start++; }
+                out.push({ d, s: head });
+                walk(start, b, d + 1, lp);
+                out.push({ d, s: '}' });
+              } else {
+                out.push({ d, s: 'do {' });
+                walk(i + 1, b, d + 1, lp);
+                out.push({ d, s: `} while (${last.c.s});` });
+              }
+              i = b + 1;
+              continue;
+            }
+          }
+          out.push({ d, label: it.pc });
+          i++;
+          continue;
+        }
+        if (it.k === 'if' || it.k === 'go') {
+          if (loop && it.t === loop.exit) { out.push({ d, s: it.k === 'if' ? `if (${it.c.s}) break;` : 'break;' }); i++; continue; }
+          if (loop && it.t === loop.head) { out.push({ d, s: it.k === 'if' ? `if (${it.c.s}) continue;` : 'continue;' }); i++; continue; }
+        }
+        if (it.k === 'if') {
+          const j = labelAt.has(it.t) ? labelAt.get(it.t) : -1;
+          if (j > i && j <= hi && closed(i + 1, j)) {
+            const last = items[j - 1];
+            const k = last && last.k === 'go' && labelAt.has(last.t) ? labelAt.get(last.t) : -1;
+            const onlyFromIf = (refs.get(it.t) || []).every(r => r === i);
+            if (j - 1 > i && k > j && k <= hi && onlyFromIf && !external.has(it.t) && closed(j + 1, k) && !(loop && (last.t === loop.exit || last.t === loop.head))) {
+              // value-producing branches: `x = cond ? a : b;`
+              const A = j - 2 === i + 1 && items[i + 1].k === 's' && /^(?:[\w.$<>\[\]\u0001\/]+ )?(\$s\d+) = (.*);$/.exec(items[i + 1].s);
+              const B = k - 1 === j + 1 && items[j + 1].k === 's' && /^(?:[\w.$<>\[\]\u0001\/]+ )?(\$s\d+) = (.*);$/.exec(items[j + 1].s);
+              if (A && B && A[1] === B[1]) {
+                const decl = /^([\w.$<>\[\]\u0001\/]+) \$s\d+ = /.exec(items[i + 1].s);
+                const tern = it.c.n === 'true' ? A[2] : `${it.c.op ? '(' + it.c.n + ')' : it.c.n} ? ${A[2]} : ${B[2]}`;
+                out.push({ d, s: `${decl ? decl[1] + ' ' : ''}${A[1]} = ${tern};` });
+                seen += 2;
+                i = k;
+                continue;
+              }
+              out.push({ d, s: `if (${it.c.n}) {` });
+              walk(i + 1, j - 1, d + 1, loop);
+              out.push({ d, s: '} else {' });
+              walk(j + 1, k, d + 1, loop);
+              out.push({ d, s: '}' });
+              i = k;
+              continue;
+            }
+            if (j - 1 > i || j === i + 1) {
+              if (j === i + 1) { i++; continue; } // jump to the very next line: nothing to skip
+              out.push({ d, s: `if (${it.c.n}) {` });
+              walk(i + 1, j, d + 1, loop);
+              out.push({ d, s: '}' });
+              i = j;
+              continue;
+            }
+          }
+          used.add(it.t);
+          out.push({ d, s: `if (${it.c.s}) goto `, to: it.t });
+          i++;
+          continue;
+        }
+        if (it.k === 'go') {
+          if (labelAt.get(it.t) === i + 1) { i++; continue; } // falls through anyway
+          used.add(it.t);
+          out.push({ d, s: 'goto ', to: it.t });
+          i++;
+          continue;
+        }
+        if (it.k === 'sw') {
+          out.push({ d, s: `switch (${it.v}) {` });
+          for (const [v, t] of it.cases) { used.add(t); out.push({ d: d + 1, s: `case ${v}: goto `, to: t }); }
+          used.add(it.def);
+          out.push({ d: d + 1, s: 'default: goto ', to: it.def });
+          out.push({ d, s: '}' });
+          i++;
+          continue;
+        }
+        i++;
+      }
+    }
+
+    // try { body } catch (T e) { handler }: javac layout is
+    //   S: body  E: goto X  H1: handler1 goto X  H2: handler2 ...  X:
+    function tryBlock(i, hi, d, loop) {
+      const cand = groups.filter(g => g.start === items[i].pc && !g.done).sort((a, b) => b.end - a.end);
+      for (const g of cand) {
+        const iE = labelAt.get(g.end);
+        if (iE === undefined || iE <= i || iE + 2 >= hi) continue;
+        const go = items[iE + 1];
+        if (!go || go.k !== 'go') continue;
+        const iX = labelAt.get(go.t);
+        if (iX === undefined || iX <= iE || iX > hi) continue;
+        const hIdx = g.handlers.map(h => labelAt.get(h.handler));
+        if (hIdx.some(x => x === undefined) || hIdx[0] !== iE + 2 || hIdx[hIdx.length - 1] >= iX) continue;
+        let ok = true;
+        for (let k = 1; k < hIdx.length; k++) {
+          const prev = items[hIdx[k] - 1];
+          if (hIdx[k] <= hIdx[k - 1] || !prev || prev.k !== 'go' || prev.t !== go.t) ok = false;
+        }
+        // nothing may jump into the body or the handlers from outside the whole statement
+        const others = groups.filter(x => x !== g && x.start === g.start && x.end === g.end);
+        if (!ok || others.length || !closed(i + 1, iE, i, iX) || !hIdx.every((h, k) => closed(h + 1, k + 1 < hIdx.length ? hIdx[k + 1] - 1 : iX, i, iX))) continue;
+        if ((refs.get(g.end) || []).length || g.handlers.some(h => (refs.get(h.handler) || []).length)) continue;
+        g.done = true;
+        out.push({ d, s: 'try {' });
+        walk(i + 1, iE, d + 1, loop);
+        g.handlers.forEach((h, k) => {
+          let a = hIdx[k] + 1;
+          const b = k + 1 < hIdx.length ? hIdx[k + 1] - 1 : iX;
+          let name = 'ex';
+          const first = items[a];
+          const m = first && first.k === 's' && /^[\w.$<>\[\]\u0001\/]+ ([A-Za-z_$][\w$]*) = ex;$/.exec(first.s);
+          if (m) { name = m[1]; a++; seen++; }
+          else if (first && first.k === 's' && /^[A-Za-z_$][\w$]* = ex;$/.test(first.s)) { name = first.s.split(' ')[0]; a++; seen++; }
+          out.push({ d, s: h.type ? `} catch (${jname(h.type)} ${name}) {` : `} finally { // (catch-all: ${name})` });
+          walk(a, b, d + 1, loop);
+        });
+        out.push({ d, s: '}' });
+        return iX;
+      }
+      return -1;
+    }
+
+    try {
+      walk(0, items.length, 0, null);
+      // try ranges that didn't fit the usual layout stay as comments
+      const left = groups.filter(g => !g.done);
+      if (left.length) out.unshift(...left.flatMap(g => g.handlers.map(h => { used.add(h.start); used.add(h.handler); if (labelAt.has(h.end)) used.add(h.end); return { d: 0, tr: h }; })));
+      if (seen !== nStmts) throw new Error('lost statements');
+    } catch (e) {
+      // safety net: plain labels + gotos
+      out.length = 0;
+      for (const it of original) {
+        if (it.k === 's') out.push({ d: 0, s: it.s });
+        else if (it.k === 'l') out.push({ d: 0, label: it.pc });
+        else if (it.k === 'try') { used.add(it.h.start); used.add(it.h.handler); out.push({ d: 0, tr: it.h }); }
+        else if (it.k === 'if') { used.add(it.t); out.push({ d: 0, s: `if (${it.c.s}) goto `, to: it.t }); }
+        else if (it.k === 'go') { used.add(it.t); out.push({ d: 0, s: 'goto ', to: it.t }); }
+        else if (it.k === 'sw') { out.push({ d: 0, s: `switch (${it.v}) {` }); for (const [v, t] of it.cases) { used.add(t); out.push({ d: 1, s: `case ${v}: goto `, to: t }); } used.add(it.def); out.push({ d: 1, s: 'default: goto ', to: it.def }); out.push({ d: 0, s: '}' }); }
+      }
+    }
+    tidy(out, used);
+    // name the labels that are still needed, in order of appearance
+    const names = new Map();
+    for (const o of out) if (o.label !== undefined && used.has(o.label) && !names.has(o.label)) names.set(o.label, 'L' + (names.size + 1));
+    const nm = pc => names.get(pc) || 'L?';
+    const lines = [];
+    for (const o of out) {
+      const pad = ind + '    '.repeat(o.d);
+      if (o.label !== undefined) { if (used.has(o.label)) lines.push(pad.slice(2) + nm(o.label) + ':'); }
+      else if (o.tr) lines.push(`${pad}// try ${nm(o.tr.start)}..${names.has(o.tr.end) ? nm(o.tr.end) : 'end'} catch (${o.tr.type ? jname(o.tr.type) : 'any'}) -> ${nm(o.tr.handler)}`);
+      else lines.push(pad + o.s + (o.to !== undefined ? nm(o.to) + ';' : ''));
+    }
+    return lines;
   }
 
   function codeOf(c, m) {
@@ -537,7 +888,7 @@ const JView = (() => {
       if (name === 'LocalVariableTable') {
         lvt = [];
         const n = dv.getUint16(p + 6);
-        for (let k = 0; k < n; k++) { const q = p + 8 + k * 10; lvt.push({ name: utf(c.cp, dv.getUint16(q + 4)), idx: dv.getUint16(q + 8) }); }
+        for (let k = 0; k < n; k++) { const q = p + 8 + k * 10; lvt.push({ name: utf(c.cp, dv.getUint16(q + 4)), desc: utf(c.cp, dv.getUint16(q + 6)), idx: dv.getUint16(q + 8) }); }
       }
       p += 6 + alen;
     }
@@ -548,7 +899,7 @@ const JView = (() => {
 
   function decompileClass(u8) {
     const c = parse(u8);
-    ctx = { pkg: c.thisName.includes('/') ? c.thisName.slice(0, c.thisName.lastIndexOf('/')) : '' };
+    ctx = { pkg: c.thisName.includes('/') ? c.thisName.slice(0, c.thisName.lastIndexOf('/')) : '', refs: new Set(), simple: new Set([c.thisName.slice(c.thisName.lastIndexOf('/') + 1).split('$')[0]]) };
     const out = [];
     const simple = c.thisName.slice(c.thisName.lastIndexOf('/') + 1);
     const isIface = c.access & 0x200, isEnum = c.access & 0x4000, isAnno = c.access & 0x2000;
@@ -599,23 +950,28 @@ const JView = (() => {
     if (out[out.length - 1] === '') out.pop();
     out.push('}');
     const pkg = ctx.pkg ? `package ${ctx.pkg.replace(/\//g, '.')};\n\n` : '';
-    return { pkg, text: out.join('\n'), name: c.thisName };
+    return { pkg, text: out.join('\n'), name: c.thisName, refs: ctx.refs, simple: ctx.simple };
   }
 
   // classes: [{ name, u8 }] (outer class first). Returns the text for one source file.
   function decompile(classes) {
     const parts = [];
     let pkg = '';
+    const refs = new Set(), simple = new Set();
     classes.forEach((k, i) => {
       try {
         const r = decompileClass(k.u8);
         if (i === 0) pkg = r.pkg;
+        r.refs.forEach(x => refs.add(x)); r.simple.forEach(x => simple.add(x));
         parts.push((i ? `// ---- inner class ${r.name.replace(/\//g, '.')}\n` : '') + r.text);
       } catch (e) {
         parts.push(`// ${k.name}: could not read (${e.message})`);
       }
     });
-    return `// Quick view: EZLARP's built-in decompiler (works on every device, instant).\n// Loops and if/else are shown as labels + goto. Use "full source" for Vineflower's output.\n${pkg}${parts.join('\n\n')}\n`;
+    const res = resolveNames(parts.join('\n\n'), refs, simple);
+    if (res.imports.length) pkg += res.imports.map(x => `import ${x};`).join('\n') + '\n\n';
+    parts.length = 0; parts.push(res.text);
+    return `// EZLARP quick view (built-in decompiler) · "full source" = Vineflower\n${pkg}${parts.join('\n\n')}\n`;
   }
 
   // javap-style listing, for the "bytecode" button without a Java runtime
@@ -624,7 +980,7 @@ const JView = (() => {
     for (const k of classes) {
       try {
         const c = parse(k.u8);
-        ctx = { pkg: '' };
+        ctx = { pkg: '', refs: new Set(), simple: new Set() };
         out.push(`// class ${c.thisName.replace(/\//g, '.')}${c.superName ? ' extends ' + c.superName.replace(/\//g, '.') : ''}`);
         for (const m of c.methods) {
           out.push(`\n  ${flags(m.access, 'm').join(' ')} ${m.name}${m.desc}`);
