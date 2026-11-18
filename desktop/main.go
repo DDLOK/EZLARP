@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	Version = "1.1.0"
+	Version = "1.2.0"
 	Port    = 47613
 )
 
@@ -64,6 +64,10 @@ func main() {
 		}
 	}
 
+	// an update downloaded last time is installed now, before anything opens
+	if !*updated && applyPendingOnStart() {
+		return
+	}
 	cleanupOldExe()
 	token := newToken()
 	// after an update the page keeps its token, so the new helper reuses it
@@ -107,6 +111,7 @@ type entry struct {
 type helper struct {
 	token    string
 	update   remoteVersion
+	upd      updState
 	mu       sync.Mutex
 	files    map[string]entry
 	lastSeen time.Time
@@ -212,18 +217,21 @@ func (h *helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "version": Version, "os": osName()})
 	case r.URL.Path == "/update":
 		if r.Method == http.MethodPost {
-			if err := h.applyUpdate(); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			writeJSON(w, map[string]any{"ok": true, "restarting": true})
-			go func() { time.Sleep(300 * time.Millisecond); os.Exit(0) }()
-			return
+			h.startUpdate()
+		} else if r.URL.Query().Get("check") == "1" {
+			h.checkOnce()
 		}
 		h.mu.Lock()
-		u := h.update
+		u, st := h.update, h.upd
 		h.mu.Unlock()
-		writeJSON(w, map[string]any{"current": Version, "latest": u.Version, "available": u.Version != "" && newer(u.Version, Version), "checked": !u.checked.IsZero()})
+		if st.State == "" {
+			st.State = "idle"
+		}
+		writeJSON(w, map[string]any{"current": Version, "latest": u.Version, "available": u.Version != "" && newer(u.Version, Version),
+			"checked": !u.checked.IsZero(), "state": st.State, "progress": st.Progress, "error": st.Error})
+	case r.URL.Path == "/quit" && r.Method == http.MethodPost:
+		writeJSON(w, map[string]any{"ok": true})
+		go func() { time.Sleep(200 * time.Millisecond); os.Exit(0) }()
 	case r.URL.Path == "/files":
 		h.mu.Lock()
 		list := make([]entry, 0, len(h.files))

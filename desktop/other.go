@@ -12,7 +12,8 @@ import (
 // Non-Windows builds run the same helper and open the page in the default browser.
 // They're used for testing; the installer is Windows-only.
 
-func afterUpdate() {}
+func afterUpdate()      {}
+func killInstalledApp() {}
 
 func selfPath() string {
 	p, err := os.Executable()

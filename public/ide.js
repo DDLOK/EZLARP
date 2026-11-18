@@ -600,48 +600,73 @@ const IDE = (() => {
 
   // ---------------------------------------------------------------- app version + updates
   const appInfo = { version: '', latest: '', available: false };
+  let notified = false, pollT = 0;
   async function checkUpdate(loud) {
     if (!App.on) return;
-    try {
-      const p = await appFetch('/ping').then(r => r.json());
-      appInfo.version = p.version;
-      let u = null;
-      try { u = await appFetch('/update').then(r => r.json()); } catch (e) { /* helper from before updates existed */ }
-      const sb = $('#sbapp');
-      sb.hidden = false;
-      if (u && u.available) {
-        appInfo.latest = u.latest; appInfo.available = true;
-        sb.className = 'click upd'; sb.textContent = '⟳ Update to ' + u.latest; sb.title = 'A new version of the EZLARP app is ready. Click to update (takes a few seconds).';
-        sb.onclick = () => applyUpdate();
-        lastNote = 'EZLARP app ' + u.latest + ' is available (you have ' + p.version + ').';
-        if (loud !== false) toast(lastNote + ' Click "Update" in the status bar.', 5000);
-      } else if (!u) {
-        // helpers from 1.0.0 can't update themselves: offer the installer, which updates in place
-        let latest = null;
-        try { latest = await fetch('/download/version.json', { cache: 'no-store' }).then(r => r.json()); } catch (e) { /* offline */ }
-        if (latest && latest.version && latest.version !== p.version) {
-          sb.className = 'click upd'; sb.textContent = '⟳ Get app ' + latest.version; sb.title = 'Download the new installer and run it: it updates the installed app.';
-          sb.onclick = () => { location.href = '/download/EZLARP-Setup.exe'; toast('run EZLARP-Setup.exe when it finishes downloading, then choose Yes to update', 6000); };
-          lastNote = 'EZLARP app ' + latest.version + ' is available. This version updates through the installer once; after that it updates itself.';
-        } else { sb.className = 'click'; sb.textContent = 'app ' + p.version; sb.onclick = () => checkUpdate(true); }
-      } else {
-        sb.className = 'click'; sb.textContent = 'app ' + p.version; sb.title = 'EZLARP app version';
-        sb.onclick = () => checkUpdate(true);
-        if (loud === true) toast(u ? 'the EZLARP app is up to date (' + p.version + ')' : 'this app version can\'t update itself: download the new installer from ezlarp.pages.dev', 4000);
-      }
-    } catch (e) { if (loud === true) appHelperDown(); }
+    clearTimeout(pollT);
+    let p;
+    try { p = await appFetch('/ping').then(r => r.json()); } catch (e) { if (loud === true) appHelperDown(); return; }
+    appInfo.version = p.version;
+    let u = null;
+    try { u = await appFetch('/update' + (loud === true ? '?check=1' : '')).then(r => r.json()); } catch (e) { /* 1.0.0 helper */ }
+    const sb = $('#sbapp');
+    sb.hidden = false; sb.onclick = null; sb.title = '';
+    const set = (cls, text, title, click) => { sb.className = cls; sb.textContent = text; sb.title = title || ''; sb.onclick = click || null; };
+    if (!u) {
+      // 1.0.0 can't update itself: the installer updates it once
+      let latest = null;
+      try { latest = await fetch('/download/version.json', { cache: 'no-store' }).then(r => r.json()); } catch (e) { /* offline */ }
+      if (latest && latest.version && latest.version !== p.version) {
+        set('click upd', '⟳ Get app ' + latest.version, 'Download the new installer and run it. It closes this version, updates it and reopens.', () => {
+          location.href = '/download/EZLARP-Setup.exe';
+          toast('run EZLARP-Setup.exe when it finishes downloading and choose Yes. EZLARP closes and reopens by itself.', 7000);
+        });
+        lastNote = 'EZLARP app ' + latest.version + ' is available. This version updates through the installer once; after that updates are automatic.';
+      } else set('click', 'app ' + p.version, 'EZLARP app version', () => checkUpdate(true));
+      return;
+    }
+    appInfo.latest = u.latest; appInfo.available = u.available;
+    if (u.state === 'downloading') {
+      set('', '⟳ Downloading update ' + (u.progress || 0) + '%', 'EZLARP ' + u.latest + ' is downloading in the background');
+      pollT = setTimeout(() => checkUpdate(false), 1200);
+    } else if (u.state === 'applying') {
+      set('', '⟳ Installing update…');
+      pollT = setTimeout(() => checkUpdate(false), 800);
+    } else if (u.available && u.state === 'ready') {
+      set('click upd', '⟳ Restart to update (' + u.latest + ')', 'Takes a few seconds; this window stays open. Otherwise it installs the next time you open EZLARP.', () => applyUpdate());
+      lastNote = 'EZLARP app ' + u.latest + ' is ready. Click "Restart to update" in the status bar, or it installs the next time you open EZLARP.';
+      if (!notified || loud === true) { notified = true; toast(lastNote, 6000); }
+    } else if (u.available && u.state === 'error') {
+      set('click upd', '⚠ Update failed · retry', u.error || 'update failed', () => applyUpdate());
+      lastNote = 'Updating to ' + u.latest + ' failed: ' + (u.error || 'unknown error');
+      if (loud === true) toast(lastNote, 6000);
+    } else if (u.available) {
+      set('click upd', '⟳ Update to ' + u.latest, 'Download and install EZLARP ' + u.latest, () => applyUpdate());
+    } else {
+      set('click', 'app ' + p.version, 'EZLARP app is up to date · click to check again', () => checkUpdate(true));
+      if (loud === true) toast('the EZLARP app is up to date (' + p.version + ')', 3000);
+    }
   }
   async function applyUpdate() {
     const sb = $('#sbapp');
-    sb.textContent = '⟳ Updating…'; sb.onclick = null;
+    clearTimeout(pollT);
+    sb.onclick = null; sb.className = ''; sb.textContent = '⟳ Updating…';
+    const target = appInfo.latest;
     try {
       const r = await fetch(APP_HELPER + '/update', { method: 'POST', headers: { 'X-EZLARP-Token': App.token } });
       if (!r.ok) throw new Error(await r.text());
-      for (let i = 0; i < 40; i++) {
-        await new Promise(res => setTimeout(res, 500));
-        try { const p = await appFetch('/ping').then(x => x.json()); if (p.version === appInfo.latest) { toast('EZLARP app updated to ' + p.version, 4000); lastNote = 'Updated to ' + p.version + '.'; return checkUpdate(false); } } catch (e) { /* restarting */ }
+      const start = Date.now();
+      while (Date.now() - start < 10 * 60 * 1000) {
+        await new Promise(res => setTimeout(res, 600));
+        let st = null;
+        try { st = await appFetch('/update').then(x => x.json()); } catch (e) { /* restarting */ }
+        if (st && st.current === target) { toast('EZLARP app updated to ' + target, 4000); lastNote = 'Updated to ' + target + '.'; notified = false; return checkUpdate(false); }
+        if (st && st.state === 'error') throw new Error(st.error || 'update failed');
+        if (st && st.state === 'downloading') sb.textContent = '⟳ Downloading update ' + (st.progress || 0) + '%';
+        else if (st && st.state === 'applying') sb.textContent = '⟳ Installing…';
+        else if (!st) sb.textContent = '⟳ Restarting…';
       }
-      throw new Error('the app didn\'t come back after updating; restart it from the Start menu');
+      throw new Error('the app didn\'t come back after updating; open EZLARP again from the Start menu');
     } catch (e) {
       toast('update failed: ' + (e.message || e), 6000);
       checkUpdate(false);

@@ -11,9 +11,13 @@
   helper needs a random per-run token and only answers https://ezlarp.pages.dev. Files are never
   uploaded.
 - The app requires a Discord login (when login is set up on the site).
-- **Updates**: the helper reads `/download/version.json`; the status bar shows "Update to x.y.z". Clicking it
-  downloads the new exe, checks its SHA-256 and size, swaps it for the running one (the old one is renamed and
-  deleted on the next start), and restarts the helper with the same page token, so the window stays open.
+- **Updates**: the helper checks `/download/version.json` at start and every 4 hours and downloads a newer
+  version in the background (`%LOCALAPPDATA%\EZLARP\update`), checking its SHA-256 and size. The status bar
+  shows the download, then "Restart to update": that swaps the exe and restarts the helper with the same page
+  token, so the window stays open. If you don't click it, the update installs by itself the next time EZLARP
+  starts. The running exe is never overwritten: it's renamed out of the way under a unique name (cleaned up on a
+  later start) and every step retries. The installer asks a running EZLARP to quit (or closes it) before it
+  updates, shows "1.1.0 → 1.2.0", and reopens the app.
   To ship an update: bump `Version` in `main.go`, delete `rsrc_windows_amd64.syso`, run `./build.sh`, push.
 - The window uses the VS Code layout (`public/ide.js`).
 

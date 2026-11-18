@@ -4,12 +4,12 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -80,6 +80,15 @@ func hidden(name string, args ...string) error {
 func runInstaller(silent bool, files []string) bool {
 	_, err := os.Stat(installedExe())
 	update := err == nil
+	if update {
+		if v := installedVersion(); v != "" && v == Version && !silent {
+			// same version: nothing to install, just open it
+			if msgBox("EZLARP "+Version+" is already installed.\n\nYes = open it   ·   No = reinstall it", mbYesNo|mbIconInfo) == idYes {
+				_ = exec.Command(installedExe(), files...).Start()
+				return true
+			}
+		}
+	}
 	if !silent {
 		q := "Install EZLARP on this PC?\n\n" +
 			"• Adds EZLARP to the Start menu and desktop\n" +
@@ -87,7 +96,11 @@ func runInstaller(silent bool, files []string) bool {
 			"• Installs just for you, no admin needed. Remove it any time from Settings → Apps.\n\n" +
 			"Yes = install   ·   No = just run it this once"
 		if update {
-			q = "Update the installed EZLARP app to version " + Version + "?\n\nYes = update   ·   No = just run this copy once"
+			from := installedVersion()
+			if from == "" {
+				from = "your version"
+			}
+			q = "Update EZLARP " + from + " → " + Version + "?\n\nIf EZLARP is open it closes and reopens by itself.\n\nYes = update   ·   No = just run this copy once"
 		}
 		switch msgBox(q, mbYesNoCancel|mbIconQ) {
 		case idYes:
@@ -114,17 +127,16 @@ func install() error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	// a running EZLARP.exe can't be overwritten, but it can be renamed out of the way
-	if _, err := os.Stat(exe); err == nil {
-		old := filepath.Join(dir, "EZLARP.old.exe")
-		_ = os.Remove(old)
-		if err := os.Rename(exe, old); err != nil {
-			return fmt.Errorf("close EZLARP first (%v)", err)
+	// the installed EZLARP may be running: ask it to quit (it reopens after), then swap
+	stopRunningApp()
+	if err := swapIn(selfPath(), exe); err != nil {
+		killInstalledApp()
+		time.Sleep(time.Second)
+		if err := swapIn(selfPath(), exe); err != nil {
+			return fmt.Errorf("EZLARP.exe is in use and couldn't be replaced (%v).\n\nClose every EZLARP window, or restart the PC, and run the installer again", err)
 		}
 	}
-	if err := copyFile(selfPath(), exe); err != nil {
-		return err
-	}
+	clearStaged() // an update downloaded by the old version is older than this one
 	// shortcuts (PowerShell knows where Desktop and Start menu really are, OneDrive included)
 	ps := fmt.Sprintf(`$ws = New-Object -ComObject WScript.Shell
 foreach ($d in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
@@ -160,6 +172,7 @@ func runUninstall() {
 	if msgBox("Remove EZLARP from this PC?\n\nThis also signs the app out (its saved login is deleted).", mbYesNo|mbIconQ) != idYes {
 		return
 	}
+	stopRunningApp()
 	for _, ext := range []string{".jar", ".exe", ".dll", ".apk", ".class", ".mrpack", ".dex"} {
 		_ = hidden("reg", "delete", `HKCU\Software\Classes\SystemFileAssociations\`+ext+`\shell\EZLARP`, "/f")
 	}
@@ -172,6 +185,28 @@ func runUninstall() {
 	c := exec.Command("cmd", "/c", "ping -n 3 127.0.0.1 >nul & rmdir /s /q \""+installDir()+"\"")
 	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWin}
 	_ = c.Start()
+}
+
+// the version Settings → Apps knows about
+func installedVersion() string {
+	c := exec.Command("reg", "query", `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\EZLARP`, "/v", "DisplayVersion")
+	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWin}
+	out, err := c.Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if f := strings.Fields(line); len(f) >= 3 && f[0] == "DisplayVersion" {
+			return f[len(f)-1]
+		}
+	}
+	return ""
+}
+
+// closes EZLARP processes started from the install folder (not this one)
+func killInstalledApp() {
+	ps := fmt.Sprintf(`Get-Process | Where-Object { $_.Path -and $_.Path -like '%s\*' -and $_.Id -ne %d } | Stop-Process -Force -ErrorAction SilentlyContinue`, psq(installDir()), os.Getpid())
+	_ = hidden("powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps)
 }
 
 // app window: Edge or Chrome in app mode with EZLARP's own profile
@@ -195,23 +230,6 @@ func openWindow(u string) {
 	}
 	// no Chromium browser: default browser in a normal tab
 	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", u).Start()
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 // single-quote escaping for PowerShell strings
