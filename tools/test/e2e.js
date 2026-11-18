@@ -377,7 +377,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await drop('big.jar');
   ok(!(await waitState(/^scan done/, 180000)), 'lazy ready', await state());
   ok(!(await page.$eval('#decall', e => e.hidden)), 'decompile-all button', await page.evaluate(() => JSON.stringify({ st: el.fstate.textContent, lazy: S.lazy, name: S.name, pend: pendingCount(), err: el.err.hidden ? '' : el.err.textContent })));
-  ok(/full source replaces it/.test(await page.textContent('#banner')), 'lazy banner');
+  ok(/source replaces it/.test(await page.textContent('#banner')), 'lazy banner');
   ok(await waitCode(/class Main|public class/, 120000), 'entry class decompiled on demand');
   await page.click('.rtab[data-view=source]');
   await page.click('#qmode [data-m=files]');

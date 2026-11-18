@@ -244,7 +244,7 @@ function renderBanner() {
   if (S.lazy && pend && typeof JAVA_AUTO !== 'undefined' && !JAVA_AUTO) {
     parts.push(`<span>Code is shown by EZLARP's built-in decompiler: instant and works on ${IS_IOS ? 'iPhone / iPad' : 'every device'}. "decompile all" makes code search cover every class.</span>`);
   } else if (S.lazy && pend) {
-    parts.push(`<span>Code shows instantly in quick view, then Vineflower's full source replaces it (${pend} classes not opened yet). Code search covers opened files; the <b>strings</b> search covers every class.</span>`);
+    parts.push(`<span>Code shows instantly in quick view, then ${ENGINE_SHORT[S.engine] || 'the full decompiler'}'s source replaces it (${pend} classes not opened yet). Code search covers opened files; the <b>strings</b> search covers every class.</span>`);
   }
   b.hidden = !parts.length;
   b.className = 'banner' + (stack.length && !(S.lazy && pend) ? ' info' : '');
@@ -635,7 +635,7 @@ async function openFile(path, opts = {}) {
       if (f.showingQuick) {
         text = f.quick;
         if (f.error && f.fullRequested !== false) text = `// full decompiler (${ENGINES[S.engine]}) failed: ${String(f.error).split('\n').join('\n// ')}\n` + text;
-        el.cmeta.textContent = 'quick view · built in' + (f.pending ? ` · ${ENGINES[S.engine]} running…` : '');
+        el.cmeta.textContent = 'quick view · built in' + (f.pending ? ` · ${ENGINES[f.engineWant || S.engine]} running…` : '');
         el.qv.textContent = f.text != null ? 'full source' : f.pending ? 'full source (loading)' : 'full source';
       } else {
         text = f.text;
