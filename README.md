@@ -93,23 +93,47 @@ Nothing is enforced until login is set up: with no secrets the site stays open, 
 
 ### Cloudflare Pages settings (Settings → Variables and Secrets, Production)
 
-| Name | Required | What |
-|---|---|---|
-| `AUTH_SECRET` | yes | Shared with the bot. Signs the login handoff token. 32+ random chars. |
-| `SESSION_SECRET` | yes | Signs the site's own session cookie. Different from `AUTH_SECRET`. |
-| `BOT_LOGIN_URL` | yes | The bot's login page, e.g. `https://bot.example.com/login`. |
-| `PUBLIC_ORIGIN` | no | Defaults to the request origin, e.g. `https://ezlarp.pages.dev`. |
-| `ANON_SCAN_LIMIT` | no | Free scans before login. Default `2`. |
-| `ANON_WINDOW_HOURS` | no | Window for the free scans. Default `24`. |
-| `VPN_BLOCK` | no | Set to `off` to turn the VPN block off. |
-| `PROXYCHECK_KEY` | no | proxycheck.io key for better VPN detection. |
-| `IP_SALT` | no | Extra salt for the hashed IPs kept in KV. |
-| `AUTH_AUDIENCE` | no | Expected `aud` in the bot token. Default `ezlarp`. |
+Login works one of two ways. Pick one.
+
+**A. Built-in (easiest, no extra hosting).** The site does Discord login itself and uses the
+bot's token to add the user to the server.
+
+| Name | What |
+|---|---|
+| `SESSION_SECRET` | Signs the session cookie. 32+ random chars. |
+| `DISCORD_CLIENT_ID` | The bot's Application ID. |
+| `DISCORD_CLIENT_SECRET` | OAuth2 client secret from the Discord developer portal. |
+| `DISCORD_BOT_TOKEN` | The bot's token (secret). |
+| `DISCORD_GUILD_ID` | The server to add people to. |
+| `DISCORD_ROLE_ID` | Optional role to give them. |
+
+In the Discord developer portal, OAuth2 → Redirects: `https://ezlarp.pages.dev/auth/callback`.
+The bot must be in the server with the Create Invite permission (and above `DISCORD_ROLE_ID`).
+
+**B. Through the bot's own web server.** Set these; they win over A if both are set.
+
+| Name | What |
+|---|---|
+| `SESSION_SECRET` | As above. |
+| `AUTH_SECRET` | Shared with the bot. Signs the login handoff token. |
+| `BOT_LOGIN_URL` | The bot's login page, e.g. `https://bot.example.com/login`. |
+| `AUTH_AUDIENCE` | Optional. Expected `aud` in the bot token. Default `ezlarp`. |
+
+**Either way, optional:**
+
+| Name | What |
+|---|---|
+| `PUBLIC_ORIGIN` | Defaults to the request origin, e.g. `https://ezlarp.pages.dev`. |
+| `ANON_SCAN_LIMIT` | Free scans before login. Default `2`. |
+| `ANON_WINDOW_HOURS` | Window for the free scans. Default `24`. |
+| `VPN_BLOCK` | Set to `off` to turn the VPN block off. |
+| `PROXYCHECK_KEY` | proxycheck.io key for better VPN detection. |
+| `IP_SALT` | Extra salt for the hashed IPs kept in KV. |
 
 KV: create a namespace and bind it as `EZLARP_KV` (Settings → Bindings → KV namespace).
 Redeploy after changing settings.
 
-### Bot handoff contract
+### Bot handoff contract (option B)
 
 1. The site sends the user to `BOT_LOGIN_URL?return=https://ezlarp.pages.dev/auth/done`.
 2. The bot runs Discord OAuth2 (`identify guilds.join`) and adds the user to the server with

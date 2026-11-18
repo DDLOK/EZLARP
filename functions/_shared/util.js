@@ -106,11 +106,19 @@ export function ipKey(ip) {
 
 // ---- settings (Pages → Settings → Variables and Secrets)
 export function config(env) {
-  const loginReady = !!(env.AUTH_SECRET && env.SESSION_SECRET && env.BOT_LOGIN_URL);
+  // Two ways to log in:
+  //  'bot'     - BOT_LOGIN_URL + AUTH_SECRET: the bot's own web server does Discord OAuth and hands back a JWT
+  //  'builtin' - DISCORD_CLIENT_ID/SECRET + DISCORD_BOT_TOKEN + DISCORD_GUILD_ID: this site does Discord OAuth
+  //              itself and uses the bot's token to add the user to the server (no bot web server needed)
+  const viaBot = !!(env.AUTH_SECRET && env.BOT_LOGIN_URL);
+  const builtin = !!(env.DISCORD_CLIENT_ID && env.DISCORD_CLIENT_SECRET && env.DISCORD_BOT_TOKEN && env.DISCORD_GUILD_ID);
+  const loginMode = !env.SESSION_SECRET ? null : viaBot ? 'bot' : builtin ? 'builtin' : null;
+  const loginReady = !!loginMode;
   const limit = Math.max(0, parseInt(env.ANON_SCAN_LIMIT || '2', 10) || 0);
   const hours = Math.max(1, parseInt(env.ANON_WINDOW_HOURS || '24', 10) || 24);
   return {
     loginReady,
+    loginMode,
     // the free-scan limit only applies once login works and there is somewhere to count
     enforce: loginReady && !!env.EZLARP_KV && limit >= 0 && env.ANON_SCAN_LIMIT !== 'off',
     limit,

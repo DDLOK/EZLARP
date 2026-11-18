@@ -7,6 +7,7 @@ import { onRequestGet as me } from '../../functions/api/me.js';
 import { onRequestPost as consume } from '../../functions/api/scan/consume.js';
 import { onRequestGet as login } from '../../functions/auth/login.js';
 import { onRequestGet as done } from '../../functions/auth/done.js';
+import { onRequestGet as callback } from '../../functions/auth/callback.js';
 import { onRequestPost as logout } from '../../functions/auth/logout.js';
 import { onRequestGet as linkFetch } from '../../functions/api/fetch.js';
 
@@ -141,6 +142,65 @@ ok(ipKey('198.51.100.4') === '198.51.100.4', 'ipv4 unchanged');
   const env2 = { ...baseEnv(), EZLARP_KV: undefined };
   const r2 = await (await me({ request: req('/api/me'), env: env2, data: { ip: '1.1.1.1' } })).json();
   ok(r2.limit === null && r2.login === true, 'no KV bound: login works, no limit', r2);
+}
+
+// ---- built-in Discord login (no bot web server)
+{
+  const env = { SESSION_SECRET: 'session-secret', DISCORD_CLIENT_ID: '111', DISCORD_CLIENT_SECRET: 'cs', DISCORD_BOT_TOKEN: 'bt',
+    DISCORD_GUILD_ID: '999', DISCORD_ROLE_ID: '555', EZLARP_KV: fakeKV() };
+  const r = await (await me({ request: req('/api/me'), env, data: { ip: '198.51.100.9' } })).json();
+  ok(r.login === true && r.limit === 2, 'builtin: login on, limit on', r);
+  const l = await login({ request: req('/auth/login'), env });
+  const loc = new URL(l.headers.get('location'));
+  ok(loc.origin === 'https://discord.com' && loc.searchParams.get('scope') === 'identify guilds.join'
+    && loc.searchParams.get('redirect_uri') === 'https://ezlarp.pages.dev/auth/callback' && loc.searchParams.get('client_id') === '111', 'builtin: login goes to Discord', loc.toString());
+  const stateCookie = (l.headers.get('set-cookie') || '').split(';')[0];
+  ok(/^ezst=/.test(stateCookie) && /Path=\/auth/.test(l.headers.get('set-cookie')), 'builtin: state cookie set');
+  const state = loc.searchParams.get('state');
+
+  const calls = [];
+  let joinStatus = 201;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (u, o = {}) => {
+    u = String(u); calls.push({ u, o });
+    if (u.endsWith('/oauth2/token')) return o.body.get('code') === 'good' ? Response.json({ access_token: 'at' }) : new Response('bad', { status: 400 });
+    if (u.endsWith('/users/@me')) return Response.json({ id: '123456789012345678', username: 'jeff', global_name: 'Jeff', avatar: 'a_0123456789abcdef0123456789abcdef' });
+    if (/\/guilds\/999\/members\//.test(u)) return new Response(joinStatus === 201 ? '{}' : null, { status: joinStatus });
+    return new Response('', { status: 200 });
+  };
+  const c = await callback({ request: req(`/auth/callback?code=good&state=${state}`, { cookie: stateCookie }), env });
+  const setc = c.headers.get('set-cookie') || '';
+  ok(c.headers.get('location') === '/?login=ok' && /ezs=/.test(setc) && /ezst=;/.test(setc), 'builtin: callback logs in and clears state', [c.headers.get('location'), setc]);
+  const join = calls.find(x => /members/.test(x.u));
+  ok(join && join.o.method === 'PUT' && join.o.headers.authorization === 'Bot bt' && JSON.parse(join.o.body).roles[0] === '555'
+    && JSON.parse(join.o.body).access_token === 'at', 'builtin: adds user to the server with the bot token');
+  const sess = decodeURIComponent(setc.match(/ezs=([^;]+)/)[1]);
+  const u = await unseal('session-secret', sess);
+  ok(u.id === '123456789012345678' && u.name === 'Jeff' && u.avatar === 'a_0123456789abcdef0123456789abcdef', 'builtin: session has the Discord user', u);
+  const m = await (await me({ request: req('/api/me', { cookie: 'ezs=' + encodeURIComponent(sess) }), env, data: { ip: '198.51.100.9' } })).json();
+  ok(m.user && m.user.name === 'Jeff' && m.limit === null, 'builtin: logged in means no limit', m);
+
+  joinStatus = 403;
+  const c2 = await callback({ request: req(`/auth/callback?code=good&state=${state}`, { cookie: stateCookie }), env });
+  ok(c2.headers.get('location') === '/?login=ok&joined=0', 'builtin: banned/failed join still logs in, says so');
+  const c3 = await callback({ request: req(`/auth/callback?code=good&state=wrong`, { cookie: stateCookie }), env });
+  ok(/login=error/.test(c3.headers.get('location')) && !/ezs=/.test(c3.headers.get('set-cookie') || ''), 'builtin: wrong state rejected');
+  const c4 = await callback({ request: req(`/auth/callback?code=good&state=${state}`), env });
+  ok(/login=error/.test(c4.headers.get('location')), 'builtin: missing state cookie rejected');
+  const c5 = await callback({ request: req(`/auth/callback?code=bad&state=${state}`, { cookie: stateCookie }), env });
+  ok(/login=error/.test(c5.headers.get('location')), 'builtin: bad code rejected');
+  const c6 = await callback({ request: req(`/auth/callback?error=access_denied&state=${state}`, { cookie: stateCookie }), env });
+  ok(/cancelled/.test(decodeURIComponent(c6.headers.get('location'))), 'builtin: cancel handled');
+  const oldState = await seal('session-secret', { state, exp: now() - 1 });
+  const c7 = await callback({ request: req(`/auth/callback?code=good&state=${state}`, { cookie: 'ezst=' + encodeURIComponent(oldState) }), env });
+  ok(/login=error/.test(c7.headers.get('location')), 'builtin: expired state rejected');
+  globalThis.fetch = realFetch;
+
+  // bot mode wins when both are set; /auth/callback is off then, /auth/done off in builtin mode
+  const both = { ...env, AUTH_SECRET: SECRET, BOT_LOGIN_URL: 'https://bot.example.com/login' };
+  ok(new URL((await login({ request: req('/auth/login'), env: both })).headers.get('location')).origin === 'https://bot.example.com', 'bot mode wins when both set');
+  ok(/login=off/.test((await callback({ request: req('/auth/callback?code=good'), env: both })).headers.get('location')), 'callback off in bot mode');
+  ok(/login=off/.test((await done({ request: req('/auth/done?token=x'), env })).headers.get('location')), 'done off in builtin mode');
 }
 
 console.log(`${pass} passed, ${fail} failed`);
