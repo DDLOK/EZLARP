@@ -21,7 +21,7 @@ const el = {};
 for (const id of ['drop', 'file', 'pick', 'engine', 'fallback', 'rename', 'status', 'ficon', 'verdict', 'fname', 'fsize', 'ftype',
   'fstate', 'fmd5', 'fsha1', 'fhash', 'vt', 'ftags', 'fill', 'err', 'result', 'rtabs', 'scandot', 'decall', 'retry', 'report', 'dl',
   'banner', 'q', 'qmode', 'tree', 'sidefoot', 'ftabs', 'cpath', 'cmeta', 'outline', 'openjar', 'bc', 'wrap', 'copy', 'dlone',
-  'codebox', 'gutter', 'code', 'preview', 'usages', 'qv', 'filesbtn', 'mfile', 'urlform', 'url', 'cmp', 'cmpfile', 'cmpview', 'recent', 'recentlist', 'clearhist', 'scan', 'details', 'sq', 'skind', 'scount', 'strings', 'logbox', 'overlay', 'console']) {
+  'codebox', 'gutter', 'code', 'preview', 'usages', 'qv', 'filesbtn', 'mfile', 'share', 'shared', 'urlform', 'url', 'cmp', 'cmpfile', 'cmpview', 'recent', 'recentlist', 'clearhist', 'scan', 'details', 'sq', 'skind', 'scount', 'strings', 'logbox', 'overlay', 'console']) {
   el[id] = $(id);
 }
 
@@ -36,7 +36,7 @@ function freshState() {
     pe: null, sigs: [], py: null, embedded: null, strings: null, icon: null,
     scan: null, scanRes: null, cpStrings: new Map(), xrefs: new Map(), usagesOf: null, batch: null, classToSrc: new Map(), simpleIndex: new Map(), srcFlags: new Map(),
     entrypoints: new Set(), files: new Map(), lazy: false, engine: 'vf', engineUsed: '', current: null, tabs: [],
-    qmode: 'files', log: [], seconds: 0
+    qmode: 'files', log: [], seconds: 0, mixins: []
   };
 }
 
@@ -1176,6 +1176,23 @@ function jarDetails() {
       ['license', m.license ? esc(m.license) : null],
     ]));
   }
+  if (S.mixins && S.mixins.length) {
+    const SESSION = /^(net\/minecraft\/client\/session\/Session|net\/minecraft\/client\/util\/Session|net\/minecraft\/client\/User|net\/minecraft\/util\/Session|net\/minecraft\/class_320)$/;
+    const KNOWN = { 'net/minecraft/class_320': 'Session', 'net/minecraft/class_310': 'MinecraftClient' };
+    const risky = S.mixins.filter(m => m.targets.some(t => SESSION.test(t))).length;
+    const rows = [...S.mixins].sort((a, b) => (b.targets.some(t => SESSION.test(t)) - a.targets.some(t => SESSION.test(t))) || a.cls.localeCompare(b.cls));
+    h += section(`MIXINS · ${S.mixins.length}${risky ? ` · ${risky} into the session class` : ''}`,
+      '<p class="hint" style="margin:0 0 8px">Mixins change Minecraft\'s own code. Each row: the mod\'s class → the Minecraft class it rewrites.</p>' +
+      '<table class="t"><tr><th>mixin</th><th>changes</th></tr>' + rows.map(m => {
+        const own = m.cls.includes('!') ? esc(m.cls.replace(/\//g, '.')) : fileForClass(m.cls) ? `<a class="link" data-cls="${esc(m.cls)}">${esc(m.cls.replace(/\//g, '.'))}</a>` : esc(m.cls.replace(/\//g, '.'));
+        const tg = m.targets.map(t => {
+          const bad = SESSION.test(t);
+          const label = esc(t.replace(/\//g, '.')) + (KNOWN[t] ? ` <span style="color:var(--dim)">(${KNOWN[t]})</span>` : '');
+          return bad ? `<span class="ent-hi" title="the login/session class">${label}</span>` : label;
+        }).join('<br>');
+        return `<tr><td>${own}</td><td>${tg || '<span style="color:var(--dim)">(none)</span>'}</td></tr>`;
+      }).join('') + '</table>');
+  }
   h += section(S.embedded ? 'EMBEDDED JAVA ARCHIVE' : S.dexMode ? 'DEX CLASSES' : 'JAVA ARCHIVE', kv([
     ['classes', j.classCount],
     ['source files', [...S.files.values()].filter(f => f.type === 'src').length + (S.lazy ? ` (${[...S.files.values()].filter(f => f.type === 'src' && f.text != null).length} decompiled so far)` : '')],
@@ -1346,6 +1363,83 @@ function buildReport() {
     pyinstaller: S.py ? { python: S.py.pyver, files: S.py.files.map(f => f.name) } : null
   };
 }
+// ------------------------------------------------------------------ share links
+// The report travels inside the link (#r=...), compressed. Nothing is uploaded anywhere.
+
+const b64url = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
+const unb64url = t => { const s = atob(t.replace(/-/g, '+').replace(/_/g, '/')); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; };
+async function pipeBytes(u8, stream) { return new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(stream)).arrayBuffer()); }
+async function packShare(obj) {
+  const raw = new TextEncoder().encode(JSON.stringify(obj));
+  if (typeof CompressionStream === 'function') { try { return 'z' + b64url(await pipeBytes(raw, new CompressionStream('deflate-raw'))); } catch (e) { /* fall back */ } }
+  return 'j' + b64url(raw);
+}
+async function unpackShare(code) {
+  const u8 = unb64url(code.slice(1));
+  const raw = code[0] === 'z' ? await pipeBytes(u8, new DecompressionStream('deflate-raw')) : u8;
+  return JSON.parse(new TextDecoder().decode(raw));
+}
+function shareData(level) {
+  // level 0 = everything that fits, higher = trimmed so the link stays short enough for Discord
+  const sc = S.scan, r = S.scanRes;
+  const evN = [3, 1, 0, 0][level], urlN = [8, 4, 2, 0][level], fN = [14, 10, 8, 6][level];
+  const cut = (t, n) => t.length > n ? t.slice(0, n) + '…' : t;
+  return {
+    v: 1, n: S.name, s: S.size, h: S.hashes.sha256 || '', k: el.ftype.textContent, t: Math.floor(Date.now() / 1000),
+    vd: sc.verdict, c: r.classCount,
+    d: sc.detections.map(d => [d.name, d.kind, dots(d.where[0] || '')]),
+    f: sc.findings.slice(0, fN).map(f => [f.rule.id, f.where.size, [...f.where.entries()].slice(0, evN).map(([w, ev]) => cut(dots(w), 60) + (ev.size ? ': ' + cut([...ev][0], 90) : ''))]),
+    u: [...r.urls.keys()].slice(0, urlN).map(u => cut(u, 90)),
+  };
+}
+async function makeShareLink() {
+  for (let level = 0; level < 4; level++) {
+    const link = `${location.origin}/#r=${await packShare(shareData(level))}`;
+    if (link.length <= 1700 || level === 3) return link;
+  }
+}
+el.share.onclick = async () => {
+  if (!S.scan) { toast('nothing to share yet'); return; }
+  const link = await makeShareLink();
+  const title = `EZLARP: ${S.name} — ${Scan.VERDICT_TEXT[S.scan.verdict]}`;
+  if (navigator.share && PHONE.matches) {
+    try { await navigator.share({ title, text: title, url: link }); return; } catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  await copyText(link, el.share);
+  toast(`link copied (${link.length} characters) · paste it in Discord`);
+};
+
+function renderShared(d) {
+  const RULE = new Map(Scan.RULES.map(r => [r.id, r]));
+  const when = d.t ? new Date(d.t * 1000).toLocaleString() : '';
+  const vt = d.h ? `<a class="link" href="https://www.virustotal.com/gui/file/${esc(d.h)}" target="_blank" rel="noopener">VirusTotal ↗</a>` : '';
+  const sev = { high: 'HIGH', med: 'MED', low: 'LOW' };
+  let h = `<div class="sh-top"><span class="sh-pill">SHARED REPORT</span><span class="sh-note">scanned ${esc(when)}</span><button class="btn ghost sm" id="shclose">close</button></div>`;
+  h += `<div class="sh-warn">This report came from a link, so it was <b>not</b> checked here and whoever made the link could have edited it.${d.vd === 'clean' ? ' <b>Don\'t trust a "clean" link from someone who wants you to run the file:</b>' : ''} Drop the file above to scan it yourself.</div>`;
+  h += `<div class="sh-main"><div class="verdict ${esc(d.vd)}"><div class="word">${esc((Scan.VERDICT_TEXT[d.vd] || d.vd || '').toUpperCase())}</div><div class="l">${esc(d.d && d.d.length ? d.d.map(x => x[0]).join(', ') : `${d.c || 0} classes scanned`)}</div></div>`;
+  h += `<div class="sh-file"><div><b>${esc(d.n)}</b></div><div class="sh-meta">${esc(d.k || '')} · ${human(d.s || 0)}</div>${d.h ? `<div class="sh-hash">sha-256 <code>${esc(d.h)}</code> ${vt}</div>` : ''}</div></div>`;
+  for (const [name, kind, where] of d.d || []) h += `<div class="detect"><div><span class="dn">${esc(name)}</span><span class="dk">${esc(kind)}</span></div>${where ? `<div class="dw"><span>${esc(where)}</span></div>` : ''}</div>`;
+  if (d.f && d.f.length) {
+    h += '<h3 class="sh-h">INDICATORS</h3>';
+    for (const [id, n, ev] of d.f) {
+      const r = RULE.get(id);
+      if (!r) continue;
+      h += `<div class="sh-f ${r.sev}"><span class="sev">${sev[r.sev]}</span> ${esc(r.title)} <span class="sh-n">${plural(n, 'place')}</span>${ev.length ? `<div class="sh-ev">${ev.map(e => esc(e.replace(/\bhttp/gi, 'hxxp'))).join('<br>')}</div>` : ''}</div>`;
+    }
+  }
+  if (d.u && d.u.length) h += `<h3 class="sh-h">URLS</h3><div class="sh-ev">${d.u.map(u => esc(u.replace(/^http/i, 'hxxp'))).join('<br>')}</div>`;
+  h += `<p class="hint">To check it yourself, drop the same file above. If its sha-256 matches, it is the same file.</p>`;
+  el.shared.innerHTML = h;
+  el.shared.hidden = false;
+  el.shared.querySelector('#shclose').onclick = () => { el.shared.hidden = true; history.replaceState(null, '', location.pathname); };
+}
+async function openSharedFromHash() {
+  const m = /[#&]r=([zj][\w-]+)/.exec(location.hash);
+  if (!m) return false;
+  try { renderShared(await unpackShare(m[1])); } catch (e) { toast('that share link is damaged or incomplete'); }
+  return true;
+}
+
 el.report.onclick = () => download(`${S.baseName}.ezlarp-report.json`, JSON.stringify(buildReport(), null, 2), 'application/json');
 
 // ------------------------------------------------------------------ keyboard

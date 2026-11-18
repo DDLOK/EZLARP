@@ -108,6 +108,10 @@ const Scan = (() => {
     { id: 'sig-skyrage', sev: 'high', title: 'Skyrage malware marker',
       why: 'Contacts skyrage.de, the server of the Skyrage Minecraft malware (2023).',
       str: /(?:^|[/.@])skyrage\.de\b/i },
+    { id: 'enc-blob', sev: 'med', title: 'Encrypted file inside', blob: true,
+      why: 'A file with no known format whose bytes look random. Malware hides its real code like this and decrypts it when it runs. Some mods keep encrypted assets legitimately (licence keys, protected resources).' },
+    { id: 'mixin-session', sev: 'high', title: 'Mixin rewrites the Minecraft session (login) class', mixin: true,
+      why: 'Lets the mod read or replace your account token from inside Minecraft. Account-switcher mods do this; session stealers do too.' },
     { id: 'obf-tool', sev: 'low', title: 'Obfuscator marker',
       why: 'Left behind by a commercial or public obfuscator.',
       str: /Allatori|ZKM \d|Stringer Java Obfuscator|skidfuscator|paramorphism|branchlock|qprotect|Obfuscated (?:by|with)|radon\b.*obfuscat/i },
@@ -121,6 +125,8 @@ const Scan = (() => {
   const refIndex = new Map();   // "owner.member" -> rules
   const ENCODED = RULES.find(r => r.encoded);
   const NATIVE = RULES.find(r => r.native);
+  const BLOB = RULES.find(r => r.blob);
+  const MIXIN_SESSION = RULES.find(r => r.mixin);
   const clsRules = [];
   const strRules = [];
   for (const r of RULES) {
@@ -218,8 +224,14 @@ const Scan = (() => {
   function scanClass(res, info, prefix = '') {
     const where = prefix + (info.name || '?');
     res.classCount++;
+    const LOADERS = /^java\/(?:lang\/ClassLoader|security\/SecureClassLoader|net\/URLClassLoader)$/;
     for (const ref of info.refs) {
-      const rules = refIndex.get(ref);
+      let rules = refIndex.get(ref);
+      // a call on the class itself runs the inherited method: Loader.defineClass -> ClassLoader.defineClass
+      if (!rules && info.superName && ref.startsWith(info.name + '.')) {
+        const member = ref.slice(info.name.length + 1);
+        rules = refIndex.get(info.superName + '.' + member) || (LOADERS.test(info.superName) ? refIndex.get('java/lang/ClassLoader.' + member) : null);
+      }
       if (rules) for (const r of rules) hit(res, r, where, ref.replace(/\//g, '.'));
     }
     if (clsRules.length) {
@@ -232,6 +244,36 @@ const Scan = (() => {
   function scanNative(res, where, strings) {
     hit(res, NATIVE, where, `${strings.length} strings scanned`);
     for (const st of strings) scanString(res, st.s, where);
+  }
+
+  // ---- encrypted payloads: random-looking files with no known format
+  const KNOWN_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|ogg|oga|wav|mp3|flac|ttf|otf|woff2?|jar|zip|gz|xz|bz2|7z|zst|lz4|br|pdf|so|dll|dylib|jnilib|class|nbt|schem|schematic|mca|litematic|kotlin_module|kotlin_builtins|dex|arsc|rsa|dsa|ec|sf)$/i;
+  const MAGIC = ['89504e47', 'ffd8ff', '474946', '4f676753', '504b', '1f8b', '52494646', '494433', 'fffb', 'fff3', '664c6143', '774f4646', '774f4632',
+    '00010000', '4f54544f', '00000100', '424d', 'cafebabe', 'fd377a58', '425a68', '377abcaf', '28b52ffd', '04224d18', '25504446', '52617221',
+    '6465780a', '7f454c46', '4d5a', 'cffaedfe', 'feedfacf', '53514c69', '30820', '3082'];
+  function entropy(u8) {
+    const n = Math.min(u8.length, 65536);
+    if (!n) return 0;
+    const f = new Uint32Array(256);
+    for (let i = 0; i < n; i++) f[u8[i]]++;
+    let e = 0;
+    for (let i = 0; i < 256; i++) if (f[i]) { const p = f[i] / n; e -= p * Math.log2(p); }
+    return e;
+  }
+  const blobCandidate = (name, size) => size >= 1024 && size <= 64 * 1048576 && !KNOWN_EXT.test(name) && !/\.class$/i.test(name) && !/META-INF\/[^/]+\.(SF|RSA|DSA|EC)$/i.test(name);
+  function scanBlob(res, where, u8) {
+    if (u8.length < 1024 || KNOWN_EXT.test(where) || /META-INF\/[^/]+\.(SF|RSA|DSA|EC)$/i.test(where)) return false;
+    let head = '';
+    for (let i = 0; i < Math.min(4, u8.length); i++) head += u8[i].toString(16).padStart(2, '0');
+    if (MAGIC.some(m => head.startsWith(m))) return false;
+    const e = entropy(u8);
+    if (e < 7.5) return false;
+    hit(res, BLOB, where, `${u8.length >= 1048576 ? (u8.length / 1048576).toFixed(1) + ' MB' : Math.round(u8.length / 1024) + ' KB'} · entropy ${e.toFixed(2)} / 8`);
+    return true;
+  }
+  function scanMixin(res, where, targets) {
+    const SESSION = /^(net\/minecraft\/client\/session\/Session|net\/minecraft\/client\/util\/Session|net\/minecraft\/client\/User|net\/minecraft\/util\/Session|net\/minecraft\/class_320)$/;
+    for (const t of targets) if (SESSION.test(t)) hit(res, MIXIN_SESSION, where, 'targets ' + t.replace(/\//g, '.'));
   }
 
   // Short plain-text summary for pasting into Discord / chat. URLs are defanged.
@@ -286,6 +328,8 @@ const Scan = (() => {
     { name: 'Crypto wallet stealer', kind: 'behaviour', needs: [['wallets'], EXFIL] },
     { name: 'Launcher account stealer', kind: 'behaviour', needs: [['launcher-accounts'], EXFIL] },
     { name: 'Dropper (downloads and installs a program)', kind: 'behaviour', needs: [['payload-url'], ['persistence']] },
+    { name: 'Hidden payload loader', kind: 'behaviour', needs: [['enc-blob'], ['dynload']] },
+    { name: 'Minecraft session stealer (mixin)', kind: 'behaviour', needs: [['mixin-session'], EXFIL] },
   ];
   function detectFamilies(res) {
     const out = [];
@@ -339,5 +383,5 @@ const Scan = (() => {
   }
 
   const VERDICT_TEXT = { malicious: 'MALICIOUS', suspicious: 'SUSPICIOUS', review: 'needs review', clean: 'clean' };
-  return { RULES, VERDICT_TEXT, newResult, scanClass, scanString, scanNative, scanNames, summarize, textSummary, decodings };
+  return { RULES, VERDICT_TEXT, newResult, scanClass, scanString, scanNative, scanNames, scanBlob, scanMixin, blobCandidate, entropy, summarize, textSummary, decodings };
 })();

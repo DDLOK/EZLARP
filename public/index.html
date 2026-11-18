@@ -104,6 +104,8 @@
     </div>
   </section>
 
+  <section class="card shared" id="shared" hidden></section>
+
   <section class="card recent" id="recent" hidden>
     <div class="recent-head"><h3>RECENT SCANS</h3><span class="meta">names and results only, kept in this browser · files are never stored</span><button class="link" id="clearhist">clear</button></div>
     <div id="recentlist"></div>
@@ -142,6 +144,7 @@
       <input type="file" id="cmpfile" hidden>
       <button id="decall" class="btn ghost" hidden title="Decompile every class now. Large jars can take several minutes.">decompile all</button>
       <button id="retry" class="btn ghost" hidden>retry with CFR</button>
+      <button id="share" class="btn ghost" title="Copy a short link to this report (the file itself is not uploaded)">share</button>
       <button id="report" class="btn ghost" title="Download the analysis as JSON">report</button>
       <button id="dl" class="btn">download .zip</button>
     </div>
@@ -236,7 +239,7 @@
 </div>
 <pre id="console" hidden></pre>
 
-<footer class="foot">EZLARP &middot; v0.9 &middot; Vineflower 1.12.0 / CFR 0.152 / dex2jar 2.4 on CheerpJ 5 &middot; static heuristics, not an antivirus <span class="pc-only">&middot; <button class="link" id="keysbtn">keyboard shortcuts (?)</button></span></footer>
+<footer class="foot">EZLARP &middot; v0.10 &middot; Vineflower 1.12.0 / CFR 0.152 / dex2jar 2.4 on CheerpJ 5 &middot; static heuristics, not an antivirus <span class="pc-only">&middot; <button class="link" id="keysbtn">keyboard shortcuts (?)</button></span></footer>
 <script src="/inspect.js"></script>
 <script src="/jview.js"></script>
 <script src="/scan.js"></script>

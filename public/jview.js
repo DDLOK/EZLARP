@@ -895,6 +895,40 @@ const JView = (() => {
     return { bytes, exc, lvt };
   }
 
+  // ------------------------------------------------------------ hidden strings
+
+  // Common ways to hide a string in source; the plain text is added as a comment.
+  function b64(t) {
+    const clean = t.replace(/-/g, '+').replace(/_/g, '/');
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(clean) || clean.length < 8) return null;
+    let bin;
+    try { bin = typeof atob === 'function' ? atob(clean.padEnd(Math.ceil(clean.length / 4) * 4, '=')) : Buffer.from(clean, 'base64').toString('latin1'); } catch (e) { return null; }
+    return printableText(bin);
+  }
+  function printableText(bin) {
+    if (!bin || bin.length < 3) return null;
+    let ok = 0;
+    for (let i = 0; i < bin.length; i++) { const c = bin.charCodeAt(i); if ((c >= 32 && c < 127) || c === 9 || c === 10 || c === 13) ok++; }
+    if (ok / bin.length < 0.95) return null;
+    // UTF-8 bytes -> text
+    try { return decodeURIComponent(escape(bin)); } catch (e) { return bin; }
+  }
+  const unjava = s => s.replace(/\\u([0-9a-fA-F]{4})|\\(.)/g, (m, u, c) => u ? String.fromCharCode(parseInt(u, 16)) : ({ n: '\n', r: '\r', t: '\t' }[c] || c));
+  const note = t => ` /* = ${jstr(t.length > 300 ? t.slice(0, 300) + '…' : t).replace(/\*\//g, '*\\/')} */`;
+  function revealStrings(text) {
+    return text.split('\n').map(line => {
+      if (/\/\* = "/.test(line)) return line;
+      const notes = [];
+      // Base64.getDecoder().decode("...")
+      line.replace(/Base64\.get(?:Mime|Url)?Decoder\(\)\.decode\("((?:[^"\\]|\\.)*)"\)/g, (m, a) => { const d = b64(unjava(a)); if (d) notes.push(d); return m; });
+      // new StringBuilder("...").reverse()
+      line.replace(/new StringBuilder\("((?:[^"\\]|\\.)*)"\)\.reverse\(\)/g, (m, a) => { const t = unjava(a); if (t.length >= 4) notes.push([...t].reverse().join('')); return m; });
+      // hex strings passed to a decoder: decodeHex("6874...")
+      line.replace(/(?:decodeHex|hexToBytes|fromHex|parseHex|hex2bytes)\("((?:[0-9a-fA-F]{2}){4,})"\)/g, (m, a) => { const t = printableText(a.match(/../g).map(h => String.fromCharCode(parseInt(h, 16))).join('')); if (t) notes.push(t); return m; });
+      return notes.length ? line + notes.map(note).join('') : line;
+    }).join('\n');
+  }
+
   // ------------------------------------------------------------ whole class
 
   function decompileClass(u8) {
@@ -969,6 +1003,7 @@ const JView = (() => {
       }
     });
     const res = resolveNames(parts.join('\n\n'), refs, simple);
+    res.text = revealStrings(res.text);
     if (res.imports.length) pkg += res.imports.map(x => `import ${x};`).join('\n') + '\n\n';
     parts.length = 0; parts.push(res.text);
     return `// EZLARP quick view (built-in decompiler) · "full source" = Vineflower\n${pkg}${parts.join('\n\n')}\n`;
@@ -1023,7 +1058,49 @@ const JView = (() => {
     return out.join('\n');
   }
 
-  return { decompile, disassemble, dexSummary, parse };
+  // Class-level annotations (both retention kinds): [{ type, values: { name: value } }]
+  // Values: strings, numbers, class names ("Lpkg/Name;" -> "pkg/Name"), enums "Type.NAME", arrays, nested annotations.
+  function annotations(u8) {
+    const c = parse(u8);
+    const out = [];
+    const dv = c.dv, cp = c.cp;
+    for (const name of ['RuntimeInvisibleAnnotations', 'RuntimeVisibleAnnotations']) {
+      const a = c.attrs[name];
+      if (!a) continue;
+      let p = a.off;
+      const ann = () => {
+        const type = utf(cp, dv.getUint16(p)); const n = dv.getUint16(p + 2); p += 4;
+        const values = {};
+        for (let i = 0; i < n; i++) { const k = utf(cp, dv.getUint16(p)); p += 2; values[k] = val(); }
+        return { type, values };
+      };
+      const val = () => {
+        const tag = String.fromCharCode(c.u8[p++]);
+        if ('BCDFIJSZ'.includes(tag)) { const e = cp[dv.getUint16(p)]; p += 2; return e ? (typeof e.v === 'bigint' ? Number(e.v) : e.v) : null; }
+        if (tag === 's') { const v = utf(cp, dv.getUint16(p)); p += 2; return v; }
+        if (tag === 'e') { const t = utf(cp, dv.getUint16(p)), n = utf(cp, dv.getUint16(p + 2)); p += 4; return t.replace(/^L|;$/g, '') + '.' + n; }
+        if (tag === 'c') { const d = utf(cp, dv.getUint16(p)); p += 2; return d.replace(/^L|;$/g, ''); }
+        if (tag === '@') return ann();
+        if (tag === '[') { const n = dv.getUint16(p); p += 2; const arr = []; for (let i = 0; i < n; i++) arr.push(val()); return arr; }
+        throw new Error('bad annotation value');
+      };
+      const n = dv.getUint16(p); p += 2;
+      for (let i = 0; i < n; i++) out.push(ann());
+    }
+    return { name: c.thisName, list: out };
+  }
+
+  // Mixin targets of a class, or null when it isn't a mixin
+  function mixinTargets(u8) {
+    const r = annotations(u8);
+    const m = r.list.find(a => a.type === 'Lorg/spongepowered/asm/mixin/Mixin;');
+    if (!m) return null;
+    const asList = v => v == null ? [] : Array.isArray(v) ? v : [v];
+    const targets = [...asList(m.values.value), ...asList(m.values.targets).map(t => String(t).replace(/\./g, '/'))];
+    return { name: r.name, targets: [...new Set(targets.map(String))], priority: m.values.priority };
+  }
+
+  return { decompile, disassemble, dexSummary, parse, annotations, mixinTargets };
 })();
 
 if (typeof module !== 'undefined') module.exports = JView;

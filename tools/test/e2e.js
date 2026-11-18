@@ -438,6 +438,7 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
     await ip.click('#filesbtn');
     ok(await ip.isVisible('#tree') && !(await ip.isVisible('#codebox')), 'iphone: drawer opens');
     await ip.click('#tree .node[data-path="demo/mod/Config.java"]');
+    await ip.waitForFunction(() => /class Config/.test(el.code.textContent) && !document.querySelector('.view[data-view=source]').classList.contains('files-open'), null, { timeout: 5000 }).catch(() => {});
     ok(!(await ip.isVisible('#tree')) && await ip.isVisible('#codebox') && /class Config/.test(await ip.textContent('#code')), 'iphone: picking a file closes the drawer');
     await ip.evaluate(() => openFile('demo/mod/ExampleMod.java'));
     await ip.evaluate(() => openFile('demo/mod/ScanDemo.java'));
@@ -512,6 +513,45 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   ok(sideW > 360 && sideW < 440, 'resizer widens the file list', sideW);
   await page.evaluate(() => { const dt = new DataTransfer(); dt.setData('text/plain', 'https://cdn.discordapp.com/attachments/1/2/sample.apk'); document.body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true })); });
   ok(!(await waitState(/^(scan done|done)/)) && /sample\.apk/.test(await page.textContent('#fname')), 'pasting a link scans it', await state());
+
+  // ---------------- v0.10: mixins, hidden payloads, share links
+  console.log('mixins + payloads + share');
+  await page.goto(BASE + '/?v10#noprewarm');
+  await reset();
+  await page.setInputFiles('#file', FX + '/mixin-session.jar');
+  await waitState(/^scan done/);
+  ok(/Minecraft session stealer \(mixin\)/.test(await page.textContent('#verdict')), 'session mixin + webhook = stealer', await page.textContent('#verdict'));
+  ok(/Mixin rewrites the Minecraft session/.test(await page.textContent('#scan')), 'session mixin indicator');
+  await page.click('.rtab[data-view=details]');
+  const mdet = await page.textContent('.view[data-view=details]');
+  ok(/MIXINS · 2 · 1 into the session class/.test(mdet) && /net\.minecraft\.client\.gui\.screen\.TitleScreen/.test(mdet), 'mixin table lists targets', mdet.slice(0, 200));
+  const link = await page.evaluate(() => makeShareLink());
+  ok(link.length < 1800 && /#r=z/.test(link), 'share link is short and compressed', link.length);
+  await reset();
+  await page.setInputFiles('#file', FX + '/payload.jar');
+  await waitState(/^scan done/);
+  ok(/Hidden payload loader/.test(await page.textContent('#verdict')), 'encrypted blob + class loading = payload loader', await page.textContent('#verdict'));
+  ok(/Encrypted file inside/.test(await page.textContent('#scan')) && /tbfpkodt\.cache/.test(await page.textContent('#scan')) && /entropy 7\.\d+ \/ 8/.test(await page.textContent('#scan')), 'encrypted file named with entropy');
+  // the share link opens a read-only report
+  await page.goto(link.replace('https://ezlarp.pages.dev', BASE).replace(/^http:\/\/[^/]+/, BASE));
+  await page.waitForSelector('#shared:not([hidden])', { timeout: 10000 }).catch(() => {});
+  const sh = await page.textContent('#shared').catch(() => '');
+  ok(/SHARED REPORT/.test(sh) && /MALICIOUS/.test(sh) && /Minecraft session stealer \(mixin\)/.test(sh) && /mixin-session\.jar/.test(sh), 'shared report renders', sh.slice(0, 200));
+  ok(/hxxps:\/\/discord\.com/.test(sh), 'shared URLs are defanged');
+  // hidden strings decoded inline
+  await page.goto(BASE + '/?v10b#nojava');
+  await reset();
+  await page.setInputFiles('#file', FX + '/hide.jar');
+  await waitState(/^scan done/);
+  await page.click('.rtab[data-view=source]');
+  ok(await waitCode(/\/\* = "https:\/\/example\.com\/hook" \*\//, 10000) && /\/\* = "https:\/\/example\.com\/key\.txt" \*\//.test(await code()), 'base64 + reversed strings decoded inline');
+  // zip without Java contains the quick view of every class
+  const [dzq] = await Promise.all([page.waitForEvent('download'), page.click('#dl')]);
+  const zbuf = fs.readFileSync(await dzq.path());
+  const JSZipN = require(process.env.JSZIP || '/home/claude/ezlarp/public/vendor/jszip.min.js');
+  const zz = await JSZipN.loadAsync(zbuf);
+  const hj = zz.file('demo/Hide.java');
+  ok(hj && /quick view/.test(await hj.async('string')), 'zip has quick-view source when Java is off');
 
   ok(errors.length === 0, 'no page errors', errors.slice(0, 5));
   console.log(`\n${pass} passed, ${fail} failed`);

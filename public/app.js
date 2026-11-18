@@ -52,6 +52,7 @@ async function loadSample(name) {
 const hashSample = (/[#&]sample=([\w.-]+)/.exec(location.hash) || [])[1];
 const hashUrl = (/[#&]url=([^&]+)/.exec(location.hash) || [])[1];
 window.addEventListener('load', () => {
+  openSharedFromHash();
   if (hashSample) loadSample(hashSample);
   else if (hashUrl) { setMode('url'); el.url.value = decodeURIComponent(hashUrl); loadUrl(el.url.value); }
 });
@@ -619,8 +620,37 @@ function indexClass(info, srcPath, names) {
   if (strs.length) S.cpStrings.set(info.name, strs.length > 400 ? strs.slice(0, 400) : strs);
 }
 
+// @Mixin classes: what they change, and whether that's the login/session class
+const MIXIN_MARK = new TextEncoder().encode('spongepowered/asm/mixin/Mixin;');
+function hasBytes(u8, pat) {
+  outer: for (let i = u8.indexOf(pat[0]); i >= 0 && i <= u8.length - pat.length; i = u8.indexOf(pat[0], i + 1)) {
+    for (let k = 1; k < pat.length; k++) if (u8[i + k] !== pat[k]) continue outer;
+    return true;
+  }
+  return false;
+}
+function checkMixin(res, u8, prefix) {
+  if (!hasBytes(u8, MIXIN_MARK)) return null;
+  let m = null;
+  try { m = JView.mixinTargets(u8); } catch (e) { return null; }
+  if (!m) return null;
+  (S.mixins = S.mixins || []).push({ cls: prefix + m.name, targets: m.targets, priority: m.priority });
+  Scan.scanMixin(res, prefix + m.name, m.targets);
+  return m;
+}
+// random-looking files with no known format (encrypted payloads)
+async function checkBlobs(res, zip, prefix) {
+  for (const f of Object.values(zip.files)) {
+    if (f.dir) continue;
+    const size = (f._data && f._data.uncompressedSize) || 0;
+    if (!Scan.blobCandidate(f.name, size) || ARCHIVE_RE.test(f.name) || NATIVE_RE.test(f.name)) continue;
+    try { Scan.scanBlob(res, prefix + f.name, await f.async('uint8array')); } catch (e) { /* unreadable entry */ }
+  }
+}
+
 async function finishScan(res, names) {
   Scan.scanNames(res, names);
+  if (!S.apk && !S.dexMode && S.jarInfo.rz) await checkBlobs(res, S.jarInfo.rz, '');
   if (S.apk) for (const p of S.apk.perms) if (DANGEROUS_PERMS.test(p)) Scan.scanString(res, p, 'AndroidManifest.xml');
   await scanInside(res, S.jarInfo.rz, '', 0);
   setScan(res);
@@ -632,11 +662,14 @@ async function scanJar() {
   const res = Scan.newResult();
   const names = [];
   const n = j.classes.length;
+  S.mixins = [];
   for (let i = 0; i < n; i++) {
     const c = j.classes[i];
     if (i % 150 === 0) { setState(`scanning classes ${i}/${n}`, 8 + 12 * i / Math.max(1, n)); await new Promise(r => setTimeout(r, 0)); }
-    const info = Inspect.parseClass(await c.async('uint8array'), true);
+    const u8 = await c.async('uint8array');
+    const info = Inspect.parseClass(u8, true);
     if (!info || !info.name) continue;
+    checkMixin(res, u8, '');
     const versioned = /^META-INF\/versions\//.test(c.name);
     if (!versioned) {
       indexClass(info, srcPathOf(c.name), names);
@@ -674,12 +707,17 @@ async function scanInside(res, zip, prefix, depth) {
     let classes = 0;
     for (const f of Object.values(inner.files)) {
       if (f.dir || !/\.class$/i.test(f.name)) continue;
-      const info = Inspect.parseClass(await f.async('uint8array'), true);
+      const cu8 = await f.async('uint8array');
+      const info = Inspect.parseClass(cu8, true);
       if (!info) continue;
       classes++;
       Scan.scanClass(res, info, where + '!');
       Scan.scanClass(sub, info);
+      const mx = checkMixin(res, cu8, where + '!');
+      if (mx) Scan.scanMixin(sub, mx.name, mx.targets);
     }
+    await checkBlobs(res, inner, where + '!');
+    await checkBlobs(sub, inner, '');
     if (depth < 2) await scanInside(res, inner, where + '!', depth + 1);
     if (!depth) {
       let meta = null;
@@ -1396,16 +1434,24 @@ el.retry.onclick = async () => {
 el.dl.onclick = async () => {
   if (!S.files.size || busy) return;
   const pend = pendingCount();
-  if (S.lazy && pend && confirm(`Decompile the remaining ${pend} classes first? This can take a few minutes.\n\nCancel = download only what has been decompiled so far.`)) {
+  if (S.lazy && pend && JAVA_AUTO && confirm(`Decompile the remaining ${pend} classes with ${ENGINES[S.engine]} first? This can take a few minutes.\n\nCancel = use the built-in quick view for them (instant).`)) {
     await el.decall.onclick();
   }
   const old = el.dl.textContent;
   el.dl.textContent = 'zipping…';
   try {
     const zip = new JSZip();
+    let i = 0;
     for (const f of S.files.values()) {
       if (f.virtual) continue;
-      if (f.type === 'src') { if (f.text != null) zip.file(f.path, f.text); }
+      if (f.type === 'src') {
+        // not decompiled by Vineflower/CFR: the built-in quick view keeps the zip complete
+        if (f.text == null && f.quick == null) {
+          if (++i % 50 === 0) { el.dl.textContent = `zipping… ${i}`; await new Promise(r => setTimeout(r, 0)); }
+          try { f.quick = await quickText(f); } catch (e) { f.quick = '// ' + (e.message || e); }
+        }
+        zip.file(f.path, f.text != null ? f.text : f.quick);
+      }
       else if (f.type === 'py') zip.file(f.path + 'c', await pycBytes(f));
       else zip.file(f.path, f.bytes || await f.zipEntry.async('uint8array'));
     }
@@ -1527,3 +1573,5 @@ async function scanNested() {
 if ('serviceWorker' in navigator && location.protocol === 'https:' && !navigator.webdriver) {
   addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
 }
+// a share link pasted into this tab's address bar
+addEventListener('hashchange', () => { if (/[#&]r=/.test(location.hash)) location.reload(); });
