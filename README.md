@@ -15,6 +15,7 @@ Live: https://ezlarp.pages.dev
 - **Hidden payloads**: files with no known format and random-looking bytes (entropy ≥ 7.5) are reported as "Encrypted file inside"; together with runtime class loading (also via a `ClassLoader` subclass) that is the "Hidden payload loader" detection.
 - **Hidden strings in code**: the quick view adds the plain text next to `Base64...decode("...")`, `new StringBuilder("...").reverse()`, hex decoders and byte arrays.
 - **Share links**: "share" packs the report summary into a compressed `#r=` link (Discord-sized, nothing uploaded); opening it shows a read-only report with a warning that links can be edited.
+- **Five decompilers** (settings → engine): Vineflower 1.12 (best for Java), JADX 1.5 (best for Android: reads dex directly, no dex2jar), CFR 0.152, Procyon 0.6 and JD-Core 1.1.3 (JD-GUI's engine). "Auto" (default) picks JADX for APK/dex and Vineflower for everything else; auto-fallback tries the next engines when one fails; the code toolbar has a per-class engine switch to compare outputs. Third-party licenses: [THIRD_PARTY.md](THIRD_PARTY.md).
 - **Named detections**: signatures for known Minecraft malware (fractureiser, Skyrage) and behaviour detections that need "steals X" and "sends it out" together: Minecraft session stealer (same class), Discord token grabber, browser password stealer, crypto wallet stealer, launcher account stealer, dropper.
 - **Scan with URL**: Discord attachments, MediaFire pages, Gofile, GitHub release files, CurseForge CDN, Modrinth, Dropbox and Google Drive. Hosts that block in-browser downloads go through `functions/api/fetch.js` (a Cloudflare Pages Function with a host allowlist and a 150 MB cap; files stream through and are not stored).
 
@@ -63,7 +64,7 @@ browser
 | `public/vendor/jszip.min.js` | JSZip 3.10.1 |
 | `public/vineflower-1.12.0.jar`, `cfr-0.152.jar` | decompiler engines (unmodified upstream releases) |
 | `public/d2j-bundle-2.4.jar` | dex2jar 2.4 + ASM 9.5 (unmodified classes, merged into one jar) |
-| `public/ezlarp-helper-v3.jar` | drivers built from `tools/helper/src/ezlarp/*.java` (Run, Dex, Asm) |
+| `public/ezlarp-helper-v4.jar` | drivers built from `tools/helper/src/ezlarp/*.java` (Run, RunProcyon, RunJd, RunJadx, Dex, Asm) |
 | `public/samples/` | sample files for the "try" buttons, built by `tools/samples/build.sh` |
 | `public/_headers` | long cache for the (versioned) jars |
 

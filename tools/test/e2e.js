@@ -553,6 +553,31 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   const hj = zz.file('demo/Hide.java');
   ok(hj && /quick view/.test(await hj.async('string')), 'zip has quick-view source when Java is off');
 
+  // ---------------- engines: Procyon, JD-Core, JADX, auto, per-class switch
+  console.log('engines');
+  await page.goto(BASE + '/?eng#noprewarm');
+  for (const [eng, name] of [['procyon', 'Procyon'], ['jd', 'JD-Core'], ['jadx', 'JADX']]) {
+    await page.evaluate(e => { el.engine.value = e; el.engine.onchange(); }, eng);
+    await sample('sample.jar');
+    await waitState(/^scan done/);
+    await page.evaluate(() => { showView('source'); openFile('demo/mod/ExampleMod.java'); });
+    ok(await waitFull(180000) && /class ExampleMod/.test(await code()) && new RegExp(name).test(await page.textContent('#cmeta')), `${name} decompiles`, await page.textContent('#cmeta'));
+  }
+  await page.evaluate(() => { el.engine.value = 'auto'; el.engine.onchange(); });
+  await sample('sample.apk');
+  await waitState(/^scan done/);
+  ok(await page.evaluate(() => S.engine) === 'jadx', 'auto picks JADX for an APK');
+  await page.evaluate(() => { showView('source'); openFile([...S.files.values()].find(f => f.type === 'src').path); });
+  ok(await waitFull(180000) && /JADX/.test(await page.textContent('#cmeta')), 'JADX decompiles dex directly', await page.textContent('#cmeta'));
+  await sample('sample.jar');
+  await waitState(/^scan done/);
+  ok(await page.evaluate(() => S.engine) === 'vf', 'auto picks Vineflower for a jar');
+  await page.evaluate(() => { showView('source'); openFile('demo/mod/Config.java'); });
+  await waitFull(180000);
+  await page.selectOption('#fileeng', 'cfr');
+  await page.waitForFunction(() => /CFR/.test(el.cmeta.textContent) && !/quick view/i.test(el.code.textContent), null, { timeout: 120000 }).catch(() => {});
+  ok(/CFR/.test(await page.textContent('#cmeta')) && /Decompiled with CFR/.test(await code()), 'per-class engine switch', await page.textContent('#cmeta'));
+
   ok(errors.length === 0, 'no page errors', errors.slice(0, 5));
   console.log(`\n${pass} passed, ${fail} failed`);
   await browser.close();

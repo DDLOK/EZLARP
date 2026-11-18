@@ -458,3 +458,4 @@ body.has-result .shared{display:none}
 .sh-n{float:right;font:11px var(--mono);color:var(--dim)}
 .sh-ev{font:11.5px var(--mono);color:#9a9a9a;margin-top:5px;overflow-wrap:anywhere}
 .sh-warn{border:1px solid #4d4320;background:#17140a;color:#e8d9a8;border-radius:8px;padding:9px 12px;font-size:12.5px;margin-bottom:12px;line-height:1.45}
+#fileeng{font:11.5px var(--mono);background:#111;color:#ccc;border:1px solid var(--line2);border-radius:6px;padding:3px 6px;max-width:120px}

@@ -1006,7 +1006,7 @@ const JView = (() => {
     res.text = revealStrings(res.text);
     if (res.imports.length) pkg += res.imports.map(x => `import ${x};`).join('\n') + '\n\n';
     parts.length = 0; parts.push(res.text);
-    return `// EZLARP quick view (built-in decompiler) · "full source" = Vineflower\n${pkg}${parts.join('\n\n')}\n`;
+    return `// EZLARP quick view (built-in decompiler) · "full source" = the engine in settings\n${pkg}${parts.join('\n\n')}\n`;
   }
 
   // javap-style listing, for the "bytecode" button without a Java runtime

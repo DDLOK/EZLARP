@@ -4,7 +4,8 @@
 
 const $ = id => document.getElementById(id);
 
-const ENGINES = { vf: 'Vineflower 1.12.0', cfr: 'CFR 0.152' };
+const ENGINES = { vf: 'Vineflower 1.12.0', cfr: 'CFR 0.152', procyon: 'Procyon 0.6.0', jd: 'JD-Core 1.1.3', jadx: 'JADX 1.5.1' };
+const ENGINE_SHORT = { vf: 'Vineflower', cfr: 'CFR', procyon: 'Procyon', jd: 'JD-Core', jadx: 'JADX' };
 const MAX_HIGHLIGHT = 400 * 1024;
 const LANGS = {
   java: 'java', kt: 'kotlin', groovy: 'groovy', json: 'json', mcmeta: 'json', xml: 'xml', html: 'xml', fxml: 'xml', svg: 'xml',
@@ -21,7 +22,7 @@ const el = {};
 for (const id of ['drop', 'file', 'pick', 'engine', 'fallback', 'rename', 'status', 'ficon', 'verdict', 'fname', 'fsize', 'ftype',
   'fstate', 'fmd5', 'fsha1', 'fhash', 'vt', 'ftags', 'fill', 'err', 'result', 'rtabs', 'scandot', 'decall', 'retry', 'report', 'dl',
   'banner', 'q', 'qmode', 'tree', 'sidefoot', 'ftabs', 'cpath', 'cmeta', 'outline', 'openjar', 'bc', 'wrap', 'copy', 'dlone',
-  'codebox', 'gutter', 'code', 'preview', 'usages', 'qv', 'filesbtn', 'mfile', 'share', 'shared', 'urlform', 'url', 'cmp', 'cmpfile', 'cmpview', 'recent', 'recentlist', 'clearhist', 'scan', 'details', 'sq', 'skind', 'scount', 'strings', 'logbox', 'overlay', 'console']) {
+  'codebox', 'gutter', 'code', 'preview', 'usages', 'qv', 'fileeng', 'filesbtn', 'mfile', 'share', 'shared', 'urlform', 'url', 'cmp', 'cmpfile', 'cmpview', 'recent', 'recentlist', 'clearhist', 'scan', 'details', 'sq', 'skind', 'scount', 'strings', 'logbox', 'overlay', 'console']) {
   el[id] = $(id);
 }
 
@@ -592,6 +593,7 @@ async function openFile(path, opts = {}) {
   el.usages.hidden = f.type !== 'src' || !S.xrefs.size;
   el.bc.textContent = f.view === 'bc' ? 'source' : 'bytecode';
   el.qv.hidden = true;
+  el.fileeng.hidden = true;
   el.outline.hidden = true;
   el.preview.hidden = true;
   el.code.parentElement.hidden = false;
@@ -642,6 +644,12 @@ async function openFile(path, opts = {}) {
         el.qv.textContent = 'quick view';
       }
       el.qv.hidden = false;
+      // re-decompile just this class with another engine
+      if (typeof JAVA_AUTO !== 'undefined' && JAVA_AUTO) {
+        if (!el.fileeng.options.length) el.fileeng.innerHTML = Object.keys(ENGINES).map(k => `<option value="${k}">${ENGINE_SHORT[k]}</option>`).join('');
+        el.fileeng.value = f.engineWant || f.engine || S.engine;
+        el.fileeng.hidden = false;
+      }
       renderOutline(text);
     }
   } else {
@@ -969,7 +977,15 @@ el.bc.onclick = () => {
   f.view = f.view === 'bc' ? 'src' : 'bc';
   openFile(f.path);
 };
-// quick view <-> full source (Vineflower / CFR)
+el.fileeng.onchange = () => {
+  const f = S.files.get(S.current);
+  if (!f || f.type !== 'src') return;
+  f.engineWant = el.fileeng.value;
+  f.text = null; f.error = null; f.view = 'src'; f.fullRequested = true;
+  startFull(f);
+  openFile(f.path, { keepScroll: true });
+};
+// quick view <-> full source (Vineflower / CFR / ...)
 el.qv.onclick = () => {
   const f = S.files.get(S.current);
   if (!f || f.type !== 'src') return;

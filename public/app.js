@@ -1,10 +1,26 @@
 // EZLARP: analysis flow + Java engines. Everything runs client-side:
-// CheerpJ 5 (WebAssembly JVM, Java 17) runs Vineflower / CFR / dex2jar / ASM
-// through small driver classes in ezlarp-helper-v3.jar; JSZip handles archives.
+// CheerpJ 5 (WebAssembly JVM, Java 17) runs Vineflower / CFR / Procyon / JD-Core / JADX,
+// dex2jar and ASM through small driver classes in ezlarp-helper-v4.jar; JSZip handles archives.
 'use strict';
 
-const HELPER = '/app/ezlarp-helper-v3.jar';
+const HELPER = '/app/ezlarp-helper-v4.jar';
 const CP_DECOMPILE = `${HELPER}:/app/vineflower-1.12.0.jar:/app/cfr-0.152.jar`;
+// driver class + classpath per engine; each engine's jar is only downloaded when it is used
+const ENGINE_RUN = {
+  vf: ['ezlarp.Run', CP_DECOMPILE],
+  cfr: ['ezlarp.Run', CP_DECOMPILE],
+  procyon: ['ezlarp.RunProcyon', `${HELPER}:/app/procyon-decompiler-0.6.0.jar`],
+  jd: ['ezlarp.RunJd', `${HELPER}:/app/jd-core-1.1.3.jar`],
+  jadx: ['ezlarp.RunJadx', `${HELPER}:/app/jadx-core-1.5.1.jar`],
+};
+// "auto": JADX for Android code, Vineflower for everything else
+const pickEngine = v => v === 'auto' || !ENGINES[v] ? (S.dexMode || S.apk ? 'jadx' : 'vf') : v;
+// with auto-fallback on, a failing engine hands over to the next ones
+function engineOrder(first) {
+  const all = S.dexMode ? ['jadx', 'vf', 'cfr', 'procyon', 'jd'] : ['vf', 'cfr', 'procyon', 'jd', 'jadx'];
+  return el.fallback.checked ? [first, ...all.filter(e => e !== first)].slice(0, 3) : [first];
+}
+const nextEngine = e => { const all = ['vf', 'cfr', 'procyon', 'jd', 'jadx']; return all[(all.indexOf(e) + 1) % all.length]; };
 const CP_D2J = `${HELPER}:/app/d2j-bundle-2.4.jar`;
 // source files; above this, decompile on demand (#lazy=N in the URL overrides, handy for testing)
 // Up to this many source files are decompiled right away. Default 0: the report comes
@@ -17,7 +33,7 @@ const MD5_MAX = 256 * 1024 * 1024;
 
 function loadPref(k, d) { try { const v = localStorage.getItem('ezlarp.' + k); return v == null ? d : v; } catch (e) { return d; } }
 function savePref(k, v) { try { localStorage.setItem('ezlarp.' + k, v); } catch (e) { /* storage unavailable */ } }
-if (ENGINES[loadPref('engine', 'vf')]) el.engine.value = loadPref('engine', 'vf');
+if ([...el.engine.options].some(o => o.value === loadPref('engine', 'auto'))) el.engine.value = loadPref('engine', 'auto');
 el.fallback.checked = loadPref('fallback', '1') === '1';
 el.rename.checked = loadPref('rename', '0') === '1';
 el.engine.onchange = () => savePref('engine', el.engine.value);
@@ -253,7 +269,7 @@ async function handleFiles(list) {
 async function analyze(name, u8, opts = {}) {
   setBusy(true);
   S = freshState();
-  S.engine = el.engine.value;
+  S.engine = el.engine.value; // "auto" is resolved once the file type is known
   S.name = name;
   S.baseName = name.replace(/\.[^.]+$/, '') || 'output';
   S.size = u8.length;
@@ -329,6 +345,7 @@ async function analyze(name, u8, opts = {}) {
       S.jarBytes = emb.slice();
     }
 
+    S.engine = pickEngine(S.engine);
     if (S.jarBytes || S.dexMode) {
       setState('reading archive', 8);
       if (S.dexMode) {
@@ -378,7 +395,7 @@ function finish(msg, t0) {
     pushHistory({ name: S.name, sha256: S.hashes.sha256 || '', level: lvl, label, type: el.ftype.textContent.split(' · ')[0], t: Date.now() });
   }
   if ((S.lazy || S.engineUsed) && JAVA_AUTO) {
-    el.retry.textContent = 'retry with ' + (S.engine === 'vf' ? 'CFR' : 'Vineflower');
+    el.retry.textContent = 'retry with ' + ENGINE_SHORT[nextEngine(S.engine)];
     el.retry.hidden = false;
   }
 }
@@ -1181,7 +1198,10 @@ function watchProgress({ total, label, from = 20, to = 96 }) {
 
 function engineOpts(engine) {
   if (!el.rename.checked) return [];
-  return engine === 'cfr' ? ['renameillegalidents=true', 'renamedupmembers=true', 'renamesmallmembers=3'] : ['rename-members=1'];
+  if (engine === 'cfr') return ['renameillegalidents=true', 'renamedupmembers=true', 'renamesmallmembers=3'];
+  if (engine === 'vf') return ['rename-members=1'];
+  if (engine === 'jadx') return ['ezlarp.deobf=1'];
+  return [];
 }
 
 // Reads a file the JVM wrote. cjFileBlob gives null (not an error) when it is missing,
@@ -1197,7 +1217,8 @@ async function readJavaOutput(path, what) {
 
 async function runDecompiler(engine, inPath, extra, prog) {
   const outPath = `/files/ezlarp/out-${uid()}.zip`;
-  const code = await runJava('ezlarp.Run', CP_DECOMPILE, [engine, inPath, outPath, ...engineOpts(engine), ...extra], prog);
+  const [main, cp] = ENGINE_RUN[engine] || ENGINE_RUN.vf;
+  const code = await runJava(main, cp, [engine, inPath, outPath, ...engineOpts(engine), ...extra], prog);
   const zip = await JSZip.loadAsync(await readJavaOutput(outPath, `${ENGINES[engine]} (exit code ${code})`));
   const sources = {};
   for (const f of Object.values(zip.files)) if (!f.dir && f.name.startsWith('src/')) sources[f.name.slice(4)] = await f.async('string');
@@ -1211,7 +1232,7 @@ async function runDecompiler(engine, inPath, extra, prog) {
 }
 
 async function decompileAll(engine, fallback) {
-  const order = fallback ? [engine, engine === 'vf' ? 'cfr' : 'vf'] : [engine];
+  const order = fallback ? engineOrder(engine) : [engine];
   const groups = [...S.files.values()].filter(f => f.type === 'src').length;
   let lastErr;
   for (const eng of order) {
@@ -1288,7 +1309,33 @@ async function dexClassesJar(names, label) {
 }
 
 // "decompile all" for Android: convert + decompile in chunks so memory stays bounded.
+// The dex holding these classes, plus a filter file so JADX only decompiles them.
+async function jadxDexInput(names) {
+  const dm = S.dexMode;
+  await ensureJVM();
+  const i = dm.classDex.get(names[0]);
+  const d = dm.dexes[i == null ? 0 : i];
+  if (!d.path) { d.path = `/str/dex-${i}-${uid()}.dex`; cheerpOSAddStringFile(d.path, d.u8); }
+  const only = `/str/only-${uid()}.txt`;
+  cheerpOSAddStringFile(only, names.join('\n'));
+  return [d.path, ['ezlarp.only=' + only]];
+}
+
 async function decompileDexChunks(eng) {
+  if (eng === 'jadx') {
+    // JADX: one run per dex file
+    const sources = {};
+    const logs = [];
+    const dm = S.dexMode;
+    for (let i = 0; i < dm.dexes.length; i++) {
+      const d = dm.dexes[i];
+      if (!d.path) { d.path = `/str/dex-${i}-${uid()}.dex`; cheerpOSAddStringFile(d.path, d.u8); }
+      const out = await runDecompiler('jadx', d.path, [], { total: d.classes || 0, label: `JADX · ${d.name} (${i + 1}/${dm.dexes.length})`, from: 20, to: 96 });
+      Object.assign(sources, out.sources);
+      if (out.log) logs.push(out.log.split('\n').slice(0, 80).join('\n'));
+    }
+    return { sources, log: logs.join('\n') };
+  }
   const files = [...S.files.values()].filter(f => f.type === 'src' && f.dexClasses);
   const CHUNK = 600;
   const sources = {};
@@ -1327,20 +1374,30 @@ async function miniJar(f) {
 }
 
 // Decompile one source file on demand (its class + inner classes; the whole jar is the library).
-async function ensureSource(f) {
+async function ensureSource(f, first) {
   if (f.text != null) return;
   if (f.pending) return f.pending;
   f.pending = (async () => {
-    const order = el.fallback.checked ? [S.engine, S.engine === 'vf' ? 'cfr' : 'vf'] : [S.engine];
+    const order = engineOrder(first || f.engineWant || S.engine);
     const state = el.fstate.textContent;
     setState(`decompiling ${baseOf(f.path)}`, null);
     let lastErr;
     try {
-      const inPath = await miniJar(f);
+      await ensureJVM();
+      let jar = null;
       const lib = ensureJarPath();
       for (const eng of order) {
         try {
-          const out = await runDecompiler(eng, inPath, lib ? ['ezlarp.lib=' + lib] : []);
+          let inPath, extra;
+          if (S.dexMode && eng === 'jadx') {
+            // JADX reads Android dex directly: no dex2jar step
+            [inPath, extra] = await jadxDexInput(f.dexClasses);
+          } else {
+            inPath = jar || (jar = await miniJar(f));
+            extra = lib && eng !== 'jadx' ? ['ezlarp.lib=' + lib] : [];
+          }
+          setState(`decompiling ${baseOf(f.path)} with ${ENGINES[eng]}`, null);
+          const out = await runDecompiler(eng, inPath, extra);
           const key = Object.keys(out.sources).find(k => k === f.path || f.path.endsWith('/' + k)) || Object.keys(out.sources)[0];
           f.text = out.sources[key];
           f.engine = eng;
@@ -1407,12 +1464,12 @@ el.decall.onclick = async () => {
 
 el.retry.onclick = async () => {
   if (busy || !(S.jarBytes || S.dexMode)) return;
-  const other = S.engine === 'vf' ? 'cfr' : 'vf';
+  const other = nextEngine(S.engine);
   el.err.hidden = true;
   if (S.lazy) {
     S.engine = other;
-    for (const f of S.files.values()) if (f.type === 'src') { f.text = null; f.error = null; }
-    el.retry.textContent = 'retry with ' + (other === 'vf' ? 'CFR' : 'Vineflower');
+    for (const f of S.files.values()) if (f.type === 'src') { f.text = null; f.error = null; f.engineWant = null; }
+    el.retry.textContent = 'retry with ' + ENGINE_SHORT[nextEngine(other)];
     setState(`ready · ${ENGINES[other]} · decompiles as you open them`, 100);
     renderResult();
     return;
