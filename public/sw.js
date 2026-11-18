@@ -1,7 +1,7 @@
 // EZLARP offline support. Network first (so a new version always wins when online),
 // falling back to the last copy when offline. Files you scan are never stored here.
-const CACHE = 'ezlarp-shell-v2';
-const SHELL = ['/', '/style.css', '/app.js', '/ui.js', '/inspect.js', '/jview.js', '/scan.js', '/compare.js',
+const CACHE = 'ezlarp-shell-v3';
+const SHELL = ['/', '/style.css', '/app.js', '/ui.js', '/inspect.js', '/jview.js', '/scan.js', '/compare.js', '/cil.js', '/x86.js', '/native.js',
   '/vendor/jszip.min.js', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/favicon-32.png'];
 
 self.addEventListener('install', e => {

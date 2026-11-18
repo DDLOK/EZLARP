@@ -286,6 +286,12 @@ function updateFoot() {
   const files = [...S.files.values()];
   const real = files.filter(f => !f.virtual);
   const py = real.filter(f => f.type === 'py').length;
+  const cs = real.filter(f => f.type === 'cs').length;
+  if (cs) {
+    el.sidefoot.textContent = `${cs} C# files · ${real.length - cs} other`;
+    if (el.filesbtn) el.filesbtn.textContent = `☰ Files · ${real.length}`;
+    return;
+  }
   const srcCount = real.filter(f => f.type === 'src').length;
   const done = real.filter(f => f.type === 'src' && f.text != null).length;
   const opened = real.filter(f => f.type === 'src' && (f.text != null || f.quick != null)).length;
@@ -373,8 +379,8 @@ function fileRow(path, label, depth, html) {
     (flag === 'high' ? ' flag' : flag === 'med' ? ' flag-med' : '');
   row.dataset.path = path;
   row.style.paddingLeft = (8 + depth * 14) + 'px';
-  const icon = f.type === 'src' ? 'J' : f.type === 'py' ? 'P' : ARCHIVE_RE.test(path) ? '⧉' : NATIVE_FILE_RE.test(path) ? '⚙' : IMG_RE.test(path) ? '▣' : '·';
-  const color = f.type === 'src' || f.type === 'py' ? 'var(--accent2)' : ARCHIVE_RE.test(path) || NATIVE_FILE_RE.test(path) ? 'var(--warn)' : 'var(--dim)';
+  const icon = f.type === 'src' ? 'J' : f.type === 'py' ? 'P' : f.type === 'cs' ? '#' : f.type === 'asm' ? '⚙' : ARCHIVE_RE.test(path) ? '⧉' : NATIVE_FILE_RE.test(path) ? '⚙' : IMG_RE.test(path) ? '▣' : '·';
+  const color = f.type === 'src' || f.type === 'py' || f.type === 'cs' || f.type === 'asm' ? 'var(--accent2)' : ARCHIVE_RE.test(path) || NATIVE_FILE_RE.test(path) ? 'var(--warn)' : 'var(--dim)';
   const star = f.entry ? '<span class="star" title="entrypoint">★</span>' : '';
   row.innerHTML = `<span class="ic" style="color:${color}">${icon}</span><span class="nm">${html || esc(label)}</span>${star}`;
   row.title = path + (f.type === 'src' && f.text == null ? ' (not decompiled yet)' : '');
@@ -589,6 +595,7 @@ async function openFile(path, opts = {}) {
   el.openjar.hidden = !(f.type === 'res' && (ARCHIVE_RE.test(path) || /\.(exe|dll|class|dex)$/i.test(path)));
   el.openjar.textContent = ARCHIVE_RE.test(path) ? 'open this archive' : 'analyze this file';
   el.bc.hidden = f.type !== 'src' || !S.jarInfo;
+  el.bc.title = f.type === 'cs' ? 'Show the IL instructions of this type' : 'Show JVM bytecode for this class';
   el.dlone.textContent = f.type === 'py' ? 'download .pyc' : 'download';
   el.usages.hidden = f.type !== 'src' || !S.xrefs.size;
   el.bc.textContent = f.view === 'bc' ? 'source' : 'bytecode';
@@ -600,6 +607,36 @@ async function openFile(path, opts = {}) {
   el.gutter.hidden = false;
 
   let text, lang = '';
+  if (f.type === 'cs' || f.type === 'asm') {
+    el.bc.hidden = !(f.type === 'cs' && f.ti);
+    el.bc.textContent = f.view === 'il' ? 'C#' : 'IL';
+    const need = f.type === 'asm' ? f.text == null : f.view === 'il' ? f.il == null : f.text == null;
+    if (need) {
+      showPlaceholder(f.type === 'asm' ? '// disassembling…' : f.view === 'il' ? '// reading IL…' : '// decompiling to C#…');
+      await new Promise(r => setTimeout(r, 30));
+      try {
+        if (f.type === 'asm') f.text = await f.make();
+        else if (f.view === 'il') f.il = Cil.ilType(S.dotnet, f.ti);
+        else f.text = f.make();
+      } catch (e) {
+        const msg = '// failed: ' + (e.message || e);
+        if (f.view === 'il') f.il = msg; else f.text = msg;
+      }
+      if (seq !== openSeq) return;
+    }
+    el.codebox.classList.remove('loading');
+    text = f.view === 'il' ? f.il : f.text;
+    f.shown = text;
+    lang = f.type === 'asm' ? 'x86asm' : f.view === 'il' ? '' : 'csharp';
+    const nl = text.split('\n').length;
+    el.cmeta.textContent = f.type === 'asm' ? `x86 disassembly · built-in disassembler · ${nl} lines`
+      : f.view === 'il' ? `IL · ${nl} lines` : `C# · built-in .NET decompiler · ${nl} lines`;
+    if (f.type === 'cs' && f.view !== 'il') renderOutline(text);
+    else if (f.type === 'asm') renderOutline(text, /^()((?:sub|func|export)_?[\w@.?$]*|[\w@.?$]+(?= proc|:$))/);
+    renderCode(text, lang);
+    if (opts.line) scrollToLine(opts.line); else if (opts.find) scrollToFind(text, opts.find); else el.codebox.scrollTop = 0;
+    return;
+  }
   if (f.type === 'py' || f.type === 'diff') {
     text = f.text;
     lang = f.type === 'py' ? 'python' : 'diff';
@@ -728,7 +765,7 @@ function showImage(f) {
 function renderCode(text, lang, placeholder) {
   if (!placeholder) el.codebox.classList.remove('loading');
   // phones: 2-space indents so wrapped lines keep more room (display only; copy keeps the original)
-  if (PHONE.matches && (lang === 'java' || lang === 'python')) text = text.replace(/^(?: {4})+/gm, m => ' '.repeat(m.length / 2));
+  if (PHONE.matches && (lang === 'java' || lang === 'python' || lang === 'csharp' || lang === 'x86asm')) text = text.replace(/^(?: {4})+/gm, m => ' '.repeat(m.length / 2));
   const n = text.split('\n').length;
   let g = '';
   for (let i = 1; i <= n; i++) g += i + '\n';
@@ -954,7 +991,7 @@ el.wrap.onclick = () => el.codebox.classList.toggle('wrap');
 el.copy.onclick = () => {
   const f = S.files.get(S.current);
   if (!f) return;
-  const t = f.type === 'src' ? f.shown : f.text;
+  const t = f.type === 'src' || f.type === 'cs' || f.type === 'asm' ? f.shown : f.text;
   if (t != null) copyText(t, el.copy);
 };
 
@@ -963,6 +1000,7 @@ el.dlone.onclick = async () => {
   if (!f) return;
   if (f.type === 'py') { download(baseOf(f.path).replace(/\.py$/, '.pyc'), await pycBytes(f)); return; }
   if (f.type === 'diff') { download(baseOf(f.path) + '.diff', f.text, 'text/plain'); return; }
+  if (f.type === 'cs' || f.type === 'asm') { download(baseOf(f.path) + (f.view === 'il' ? '.il.txt' : ''), f.shown || '', 'text/plain'); return; }
   if (f.type === 'src') {
     if (f.view === 'bc') download(baseOf(f.path).replace(/\.java$/, '.bytecode.txt'), f.bytecode || '', 'text/plain');
     else download(baseOf(f.path), f.shown || '', 'text/plain');
@@ -973,6 +1011,7 @@ el.dlone.onclick = async () => {
 
 el.bc.onclick = () => {
   const f = S.files.get(S.current);
+  if (f && f.type === 'cs') { f.view = f.view === 'il' ? 'cs' : 'il'; openFile(f.path); return; }
   if (!f || f.type !== 'src') return;
   f.view = f.view === 'bc' ? 'src' : 'bc';
   openFile(f.path);

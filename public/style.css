@@ -474,6 +474,12 @@ body.has-result .shared{display:none}
 .vpnbar{background:#2a0f14;border-bottom:1px solid #6b2430;color:#ffb3bd;text-align:center;font-size:13px;padding:9px 14px}
 .gate-box p{font-size:13.5px;color:#ddd;line-height:1.5;margin:0 0 10px}
 .gate-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+.getapp{margin-left:10px}
+body.app .getapp{display:none}
+.applist{margin:0 0 12px;padding-left:18px;font-size:13.5px;color:#ddd;line-height:1.6}
+#appmods{margin-top:12px}
+.appgate{background:rgba(0,0,0,.92)}
+.mono{font-family:var(--mono, ui-monospace, monospace);font-size:11px;word-break:break-all;color:#888}
 .gate-actions .btn.primary{background:#5865f2;border-color:#5865f2;color:#fff;text-decoration:none}
 @media (max-width:760px){
   .top .tabs{display:none}

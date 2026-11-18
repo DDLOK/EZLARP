@@ -27,6 +27,7 @@
 <link rel="stylesheet" href="/style.css">
 <script src="/vendor/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/x86asm.min.js" defer></script>
 </head>
 <body>
 <header class="top">
@@ -35,6 +36,7 @@
     <span class="tab active">DECOMPILER</span>
     <a class="tab" href="https://github.com/DDLOK/EZLARP" target="_blank" rel="noopener">SOURCE</a>
   </nav>
+  <button class="btn ghost sm getapp pc-only" id="getapp" type="button" title="EZLARP for Windows">Windows app</button>
   <div class="acct" id="acct" hidden></div>
 </header>
 <div class="vpnbar" id="vpnbar" hidden>VPNs and proxies aren't allowed on EZLARP. Turn yours off and reload the page.</div>
@@ -56,6 +58,7 @@
       <div class="big">Drop your file here</div>
       <button id="pick" class="btn primary" type="button">Choose file</button>
       <div class="sub">JAR, CLASS, APK, DEX, EXE, MRPACK, or a whole mods folder</div>
+      <button id="appmods" class="btn sm app-only" type="button" hidden>Scan my Minecraft mods</button>
     </div>
     <div class="drop-inner" data-panel="url" hidden>
       <div class="big">Scan a download link</div>
@@ -69,7 +72,8 @@
       <button class="link" data-sample="sample.jar">mod .jar</button> &middot;
       <button class="link" data-sample="sample-wrapped.exe">wrapped .exe</button> &middot;
       <button class="link" data-sample="sample.apk">.apk</button> &middot;
-      <button class="link" data-sample="sample-python.exe">python .exe</button>
+      <button class="link" data-sample="sample-python.exe">python .exe</button> &middot;
+      <button class="link" data-sample="sample-dotnet.exe">C# .exe</button>
     </div>
     <details class="settings">
       <summary>decompiler settings</summary>
@@ -106,7 +110,7 @@
     </div>
     <div class="feat">
       <h4>Read the code</h4>
-      <p>Built-in decompiler opens any class instantly on phone or PC; five full engines on computers: Vineflower, JADX, CFR, Procyon and JD-Core.</p>
+      <p>Built-in decompiler opens any class instantly on phone or PC; five full engines on computers: Vineflower, JADX, CFR, Procyon and JD-Core. .NET EXEs come out as C#, native ones as x86/x64 assembly.</p>
     </div>
   </section>
 
@@ -232,6 +236,28 @@
     <div class="gate-actions"><a class="btn primary" id="gatelogin" href="/auth/login">Log in with Discord</a><button class="btn ghost" id="gateclose">not now</button></div>
   </div>
 </div>
+<div class="keys" id="appdl" hidden role="dialog" aria-label="EZLARP for Windows">
+  <div class="keys-box gate-box">
+    <h3>EZLARP FOR WINDOWS</h3>
+    <p>The same scanner in its own window, plus things a website can't do:</p>
+    <ul class="applist">
+      <li>Right-click any .jar, .exe, .dll or .apk → <b>Scan with EZLARP</b></li>
+      <li>One click scans every mod in your Minecraft mods folders (vanilla, Prism, CurseForge, Modrinth)</li>
+      <li>Starts from the Start menu or desktop, stays logged in</li>
+    </ul>
+    <p class="hint">The app needs a Discord login. Files are still read on your PC and never uploaded. Windows 10 and 11, installs just for you, no admin needed.</p>
+    <p class="hint">Windows may say "Windows protected your PC" because the app is new and not code-signed yet: click <b>More info</b>, then <b>Run anyway</b>.</p>
+    <div class="gate-actions"><a class="btn primary" id="appdlbtn" href="/download/EZLARP-Setup.exe" download>Download EZLARP-Setup.exe</a><button class="btn ghost" id="appdlclose">close</button></div>
+    <p class="hint mono" id="appdlhash"></p>
+  </div>
+</div>
+<div class="keys appgate" id="appgate" hidden role="dialog" aria-label="Log in to use the app">
+  <div class="keys-box gate-box">
+    <h3>LOG IN TO USE THE APP</h3>
+    <p>The EZLARP app works with your Discord account. Logging in also adds you to the EZLARP Discord server (Discord asks you first).</p>
+    <div class="gate-actions"><a class="btn primary" href="/auth/login">Log in with Discord</a></div>
+  </div>
+</div>
 <div class="keys" id="keys" hidden role="dialog" aria-label="Keyboard shortcuts">
   <div class="keys-box">
     <h3>KEYBOARD SHORTCUTS</h3>
@@ -254,9 +280,12 @@
 </div>
 <pre id="console" hidden></pre>
 
-<footer class="foot">EZLARP &middot; v0.12.1 &middot; Vineflower / JADX / CFR / Procyon / JD-Core on CheerpJ 5 &middot; static heuristics, not an antivirus <span class="pc-only">&middot; <button class="link" id="keysbtn">keyboard shortcuts (?)</button></span></footer>
+<footer class="foot">EZLARP &middot; v0.13 &middot; Vineflower / JADX / CFR / Procyon / JD-Core on CheerpJ 5 &middot; static heuristics, not an antivirus <span class="pc-only">&middot; <button class="link" id="keysbtn">keyboard shortcuts (?)</button></span></footer>
 <script src="/inspect.js"></script>
 <script src="/jview.js"></script>
+<script src="/cil.js"></script>
+<script src="/x86.js"></script>
+<script src="/native.js"></script>
 <script src="/scan.js"></script>
 <script src="/ui.js"></script>
 <script src="/app.js"></script>

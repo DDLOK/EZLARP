@@ -2,7 +2,9 @@
 # Builds the e2e fixtures into $1 (default /tmp/fx) from public/samples and a few
 # tool binaries. Needs: JDK, zip, python3; DX_JAR (dex2jar's dx jar) for app.dex;
 # a large jar to use as big.jar (BIG_JAR, default public/cfr-0.152.jar);
-# any small Windows exe as native.exe (NATIVE_EXE).
+# any small Windows exe as native.exe (NATIVE_EXE);
+# a small .NET dll as dotnet.dll (DOTNET_DLL; the e2e test expects NaturalSort.Extension.dll from
+# the ILSpy 9.1 release zip on GitHub, which this script downloads when DOTNET_DLL is unset).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 P=$PWD/public
@@ -107,3 +109,10 @@ J
 rm -f pack.mrpack && (cd mr && zip -q ../pack.mrpack modrinth.index.json)
 rm -rf oldv nest mr
 ls -l "$FX"
+
+# .NET fixture
+if [ -n "${DOTNET_DLL:-}" ]; then cp "$DOTNET_DLL" dotnet.dll
+elif [ ! -f dotnet.dll ]; then
+  curl -sSL -o /tmp/ilspy.zip https://github.com/icsharpcode/ILSpy/releases/download/v9.1/ILSpy_binaries_9.1.0.7988-x64.zip \
+    && unzip -p /tmp/ilspy.zip NaturalSort.Extension.dll > dotnet.dll || echo "skipping dotnet.dll (download failed)"
+fi

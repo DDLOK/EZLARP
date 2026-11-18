@@ -265,6 +265,39 @@ const ok = (c, name, extra) => { if (c) { pass++; console.log('  ok', name); } e
   await page.click('.rtab[data-view=details]');
   ok(/IMPORTS/.test(await page.textContent('#details')) && /asInvoker/.test(await page.textContent('#details')), 'imports + UAC level');
   await shot('06-native');
+  await page.click('.rtab[data-view=source]');
+  await page.evaluate(() => openFile('native/entry.asm'));
+  ok(await waitCode(/start proc/, 20000), 'native exe: disassembly from the entry point');
+  ok(/x86 disassembly/.test(await page.textContent('#cmeta')), 'native exe: disassembly label');
+  await page.evaluate(() => openFile('native/imports.txt'));
+  ok(await waitCode(/kernel32\.dll/i, 10000), 'native exe: import list');
+
+  // ---------------- .NET sample (built by make-dotnet-sample.py)
+  console.log('.net sample');
+  await sample('dotnet');
+  ok(!(await waitState(/analysis done/)), '.net sample', await state());
+  ok(/MALICIOUS/.test(await page.textContent('.verdict')) && /token grabber/i.test(await page.textContent('.verdict')), '.net sample: token grabber verdict', await page.textContent('.verdict'));
+  await page.click('.rtab[data-view=source]');
+  await page.evaluate(() => openFile('Demo/Grabber.cs'));
+  ok(await waitCode(/new WebClient\(\)\.DownloadFile\(text1, "update\.exe"\);/, 20000), '.net sample: C# body');
+  ok(/try\s*\{\s*new WebClient\(\)\.UploadString\(Hook, body\);/.test(await code()), '.net sample: try/catch');
+
+  // ---------------- .NET: built-in C# decompiler (fixtures: dotnet.dll, see make-fixtures.sh)
+  if (fs.existsSync(path.join(FX, 'dotnet.dll'))) {
+    console.log('.net');
+    await drop('dotnet.dll');
+    ok(!(await waitState(/analysis done/)), '.net dll', await state());
+    ok(/C# types/.test(await page.textContent('#ftags')), '.net: types listed');
+    await page.click('.rtab[data-view=source]');
+    await page.evaluate(() => openFile('NaturalSort/Extension/NaturalSortComparer.cs'));
+    ok(await waitCode(/public class NaturalSortComparer : IComparer<string>/, 20000), '.net: class decompiled to C#');
+    ok(/while \(/.test(await code()) && /return /.test(await code()) && !/\bgoto IL_0059\b/.test(await code()), '.net: loops and breaks structured');
+    await page.click('#bc');
+    ok(await waitCode(/IL_0000: ldarg\.0/, 10000), '.net: IL view');
+    await page.click('#bc');
+    ok(await waitCode(/namespace NaturalSort\.Extension/, 10000), '.net: back to C#');
+    await shot('06b-dotnet');
+  }
 
   // ---------------- junk
   console.log('junk');

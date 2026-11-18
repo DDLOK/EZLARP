@@ -122,6 +122,49 @@ const Scan = (() => {
   const IP_RE = /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?::\d{2,5})?\b/g;
   const BORING_HOST = /^(?:www\.)?(?:w3\.org|apache\.org|xml\.org|java\.sun\.com|oracle\.com|xmlsoap\.org|json-schema\.org|purl\.org|openjdk\.java\.net|mozilla\.org|gnu\.org|opensource\.org|schemas\.android\.com|schemas\.microsoft\.com|ns\.adobe\.com|localhost|127\.0\.0\.1|0\.0\.0\.0|example\.com|slf4j\.org|eclipse\.org|jcp\.org|creativecommons\.org)$/i;
 
+  // .NET (C#/VB) equivalents, matched against "Namespace/Type.Member" references from cil.js
+  const DOTNET_REFS = {
+    exec: ['System/Diagnostics/Process.Start', 'System/Diagnostics/ProcessStartInfo..ctor', 'System/Diagnostics/ProcessStartInfo.set_FileName'],
+    dynload: ['System/Reflection/Assembly.Load', 'System/Reflection/Assembly.LoadFile', 'System/Reflection/Assembly.LoadFrom', 'System/Reflection/Assembly.UnsafeLoadFrom',
+      'System/AppDomain.Load', 'System/Reflection/MethodBase.Invoke', 'System/Reflection/Emit/DynamicMethod..ctor', 'System/Runtime/InteropServices/Marshal.GetDelegateForFunctionPointer'],
+    net: ['System/Net/WebClient..ctor', 'System/Net/Http/HttpClient..ctor', 'System/Net/WebRequest.Create', 'System/Net/HttpWebRequest.GetResponse',
+      'System/Net/Sockets/TcpClient..ctor', 'System/Net/Sockets/Socket..ctor', 'System/Net/Sockets/TcpClient.Connect'],
+    'payload-url': ['System/Net/WebClient.DownloadFile', 'System/Net/WebClient.DownloadFileAsync', 'System/Net/WebClient.DownloadFileTaskAsync', 'System/Net/WebClient.DownloadData'],
+    persistence: ['Microsoft/Win32/RegistryKey.SetValue', 'Microsoft/Win32/Registry.SetValue', 'Microsoft/Win32/TaskScheduler/TaskService..ctor'],
+    screen: ['System/Drawing/Graphics.CopyFromScreen', 'System/Windows/Forms/Screen.get_PrimaryScreen', 'System/Windows/Forms/Screen.get_AllScreens'],
+    clipboard: ['System/Windows/Forms/Clipboard.GetText', 'System/Windows/Forms/Clipboard.SetText', 'System/Windows/Clipboard.GetText', 'System/Windows/Clipboard.SetText'],
+    native: ['System/Runtime/InteropServices/Marshal.Copy', 'System/Runtime/InteropServices/Marshal.AllocHGlobal'],
+    reflect: ['System/Type.GetMethod', 'System/Type.InvokeMember', 'System/Type.GetType', 'System/Activator.CreateInstance'],
+    crypto: ['System/Security/Cryptography/ProtectedData.Unprotect', 'System/Security/Cryptography/Aes.Create', 'System/Security/Cryptography/AesGcm.Decrypt',
+      'System/Convert.FromBase64String', 'System/Security/Cryptography/RijndaelManaged..ctor'],
+    sysinfo: ['System/Environment.get_MachineName', 'System/Environment.get_UserName', 'System/Management/ManagementObjectSearcher..ctor', 'System/Environment.GetFolderPath'],
+    'file-delete': ['System/IO/File.Delete', 'System/IO/Directory.Delete'],
+  };
+  // native Windows imports, as "native/<dll>.<function>" (also P/Invoke from .NET)
+  const NATIVE_REFS = {
+    exec: ['kernel32.dll.CreateProcessW', 'kernel32.dll.CreateProcessA', 'kernel32.dll.WinExec', 'shell32.dll.ShellExecuteW', 'shell32.dll.ShellExecuteA', 'shell32.dll.ShellExecuteExW', 'shell32.dll.ShellExecuteExA'],
+    dynload: ['kernel32.dll.CreateRemoteThread', 'kernel32.dll.WriteProcessMemory', 'kernel32.dll.VirtualAllocEx', 'ntdll.dll.NtUnmapViewOfSection', 'ntdll.dll.ZwUnmapViewOfSection',
+      'kernel32.dll.SetThreadContext', 'ntdll.dll.NtWriteVirtualMemory', 'kernel32.dll.QueueUserAPC'],
+    'payload-url': ['urlmon.dll.URLDownloadToFileW', 'urlmon.dll.URLDownloadToFileA'],
+    net: ['wininet.dll.InternetOpenW', 'wininet.dll.InternetOpenA', 'wininet.dll.InternetOpenUrlW', 'wininet.dll.InternetOpenUrlA', 'winhttp.dll.WinHttpOpen', 'ws2_32.dll.connect', 'ws2_32.dll.#4'],
+    persistence: ['advapi32.dll.RegSetValueExW', 'advapi32.dll.RegSetValueExA', 'advapi32.dll.CreateServiceW', 'advapi32.dll.CreateServiceA'],
+    screen: ['gdi32.dll.BitBlt', 'user32.dll.GetDesktopWindow'],
+    clipboard: ['user32.dll.GetClipboardData', 'user32.dll.SetClipboardData'],
+    crypto: ['crypt32.dll.CryptUnprotectData', 'advapi32.dll.CryptDecrypt', 'bcrypt.dll.BCryptDecrypt'],
+    sysinfo: ['kernel32.dll.GetComputerNameW', 'kernel32.dll.GetComputerNameA', 'advapi32.dll.GetUserNameW', 'advapi32.dll.GetUserNameA'],
+    'file-delete': ['kernel32.dll.DeleteFileW', 'kernel32.dll.DeleteFileA'],
+    keylog: ['user32.dll.SetWindowsHookExW', 'user32.dll.SetWindowsHookExA', 'user32.dll.GetAsyncKeyState', 'user32.dll.GetKeyState'],
+  };
+  if (!RULES.some(r => r.id === 'keylog')) RULES.push({ id: 'keylog', sev: 'med', title: 'Watches the keyboard',
+    why: 'Keyboard hooks and key-state polling are how keyloggers record what you type. Games and hotkey tools use them too, so check what is done with the keys.' });
+  for (const [id, refs] of Object.entries(NATIVE_REFS)) {
+    const r = RULES.find(x => x.id === id);
+    if (r) r.refs = (r.refs || []).concat(refs.map(x => 'native/' + x));
+  }
+  for (const [id, refs] of Object.entries(DOTNET_REFS)) {
+    const r = RULES.find(x => x.id === id);
+    if (r) r.refs = (r.refs || []).concat(refs);
+  }
   const refIndex = new Map();   // "owner.member" -> rules
   const ENCODED = RULES.find(r => r.encoded);
   const NATIVE = RULES.find(r => r.native);

@@ -95,6 +95,42 @@ const read = f => new Uint8Array(fs.readFileSync(path.join(root, 'public', 'samp
   ok(py && zlib.inflateSync(Buffer.from(pyexe.subarray(py.files[1].off, py.files[1].off + py.files[1].csize))).toString().startsWith('print("hello'), 'pyinstaller data offset');
   ok(I.parsePyInstaller(exe) === null, 'no pyinstaller in plain exe');
 
+  // x86 / x64 disassembler
+  {
+    const X86 = require(path.join(root, 'public', 'x86.js'));
+    const d = (hexs, x64 = true, ip = 0x1000) => { const r = X86.decode(Uint8Array.from(Buffer.from(hexs, 'hex')), 0, ip, x64); return r.len + ' ' + r.mn + (r.ops ? ' ' + r.ops : ''); };
+    ok(d('55') === '1 push rbp', 'x86 push rbp', d('55'));
+    ok(d('4889e5') === '3 mov rbp, rsp', 'x86 mov', d('4889e5'));
+    ok(d('488b05b8130000') === '7 mov rax, qword ptr [rip+0x13b8]', 'x86 rip-relative', d('488b05b8130000'));
+    ok(d('e800100000') === '5 call 0x2005', 'x86 call', d('e800100000'));
+    ok(d('ff15f2100000') === '6 call qword ptr [rip+0x10f2]', 'x86 call [iat]', d('ff15f2100000'));
+    ok(d('48b8efcdab8967452301') === '10 mov rax, 0x123456789abcdef', 'x86 mov imm64', d('48b8efcdab8967452301'));
+    ok(d('f30f6f0424') === '5 movdqu xmm0, xmmword ptr [rsp]', 'x86 sse', d('f30f6f0424'));
+    ok(d('c5fc77') === '3 vzeroall', 'x86 vex', d('c5fc77'));
+    ok(d('6a01', false) === '2 push 0x1', 'x86 32-bit push', d('6a01', false));
+    ok(d('ff1500204000', false) === '6 call dword ptr [0x402000]', 'x86 32-bit call [abs]', d('ff1500204000', false));
+    ok(d('dbe2', false) === '2 fnclex', 'x86 x87', d('dbe2', false));
+    ok(d('f3a4') === '2 rep movsb byte ptr es:[rdi], byte ptr ds:[rsi]', 'x86 rep movsb', d('f3a4'));
+    ok(d('0f05') === '2 syscall', 'x86 syscall');
+  }
+  // .NET metadata reader on a real assembly, if the fixture is there
+  {
+    const fx = process.env.FX || '/tmp/fx';
+    const dll = path.join(fx, 'dotnet.dll');
+    if (fs.existsSync(dll)) {
+      const Cil = require(path.join(root, 'public', 'cil.js'));
+      const A = Cil.load(new Uint8Array(fs.readFileSync(dll)));
+      const types = Cil.listTypes(A);
+      ok(types.length === 2 && /NaturalSortComparer\.cs$/.test(types[0].path), '.net types', types.map(t => t.path));
+      const cs = Cil.decompileType(A, types[0].i);
+      ok(/public int Compare\(string str1, string str2\)/.test(cs) && /private const byte TokenDigits = 2;/.test(cs), '.net members', cs.slice(0, 400));
+      ok(/c18 = num17 >= num14 \? str1\[num2 \+ num17 - num14\] : 48;/.test(cs), '.net ternary + indexer');
+      ok(/num4\+\+;/.test(cs) && /break;/.test(cs), '.net ++ and break');
+      ok(/IL_0000: ldarg\.0/.test(Cil.ilType(A, types[0].i)), '.net IL listing');
+      ok(/runtime v4\.0\.30319/.test(Cil.assemblyInfo(A)), '.net assembly info');
+    }
+  }
+
   console.log(`${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

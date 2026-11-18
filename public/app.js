@@ -58,10 +58,10 @@ async function loadSample(name) {
   try {
     el.status.hidden = false;
     setState('fetching sample', 2);
-    name = { jar: 'sample.jar', apk: 'sample.apk', exe: 'sample-wrapped.exe', python: 'sample-python.exe', py: 'sample-python.exe' }[name.toLowerCase()] || name;
+    name = { jar: 'sample.jar', apk: 'sample.apk', exe: 'sample-wrapped.exe', python: 'sample-python.exe', py: 'sample-python.exe', dotnet: 'sample-dotnet.exe', cs: 'sample-dotnet.exe', csharp: 'sample-dotnet.exe' }[name.toLowerCase()] || name;
     const r = await fetch('/samples/' + encodeURIComponent(name));
     // the host answers unknown paths with the home page, so check it isn't HTML
-    if (!r.ok || /text\/html/.test(r.headers.get('content-type') || '')) throw new Error(`no sample called "${name}" (try jar, apk, exe or python)`);
+    if (!r.ok || /text\/html/.test(r.headers.get('content-type') || '')) throw new Error(`no sample called "${name}" (try jar, apk, exe, python or dotnet)`);
     handleFiles([new File([await r.blob()], name)], { free: true }); // samples don't use up free scans
   } catch (e) { showError('could not load sample: ' + (e.message || e)); }
 }
@@ -943,6 +943,8 @@ async function analyzePE(u8) {
   const res = Scan.newResult();
   for (const s of S.strings) Scan.scanString(res, s.s, '0x' + s.off.toString(16).padStart(8, '0'));
   if (S.py) await loadPython(u8, res);
+  if (pe.dotnet && !S.jarBytes && !S.py) await loadDotnet(u8, res);
+  if (pe.ok && !S.jarBytes && !S.py && !(pe.dotnet && pe.dotnet.ilOnly)) loadNative(u8, res);
   setScan(res);
   if (!S.jarBytes && pe.ok) {
     if (!py) tag(pe.dotnet ? '.NET (C#/VB) code' : 'native machine code', pe.dotnet ? 'java' : '');
@@ -956,10 +958,64 @@ async function analyzePE(u8) {
     if (c.high) tag(plural(c.high, 'high-risk indicator'), 'bad');
     else if (c.med) tag(plural(c.med, 'indicator') + ' to review', 'warn');
     S.log.push(pe.dotnet
-      ? '.NET assembly: the code is CIL, not Java. Open it in ILSpy or dnSpy to decompile to C#.'
+      ? (S.dotnet ? '.NET assembly: decompiled to C# by the built-in .NET decompiler (open a type on the left; the IL button shows the raw instructions).'
+        : '.NET assembly: could not read its metadata (heavily protected?). See STRINGS and DETAILS.')
       : py ? 'PyInstaller bundle: see DETAILS for the bundled files.'
-        : 'No Java code found in this executable. Native machine code cannot be decompiled to Java — see DETAILS and STRINGS.');
+        : 'Native machine code: open native/entry.asm on the left for the x86/x64 disassembly, plus DETAILS and STRINGS.');
   }
+}
+
+// ------------------------------------------------------------------ native code (x86 / x64)
+
+function loadNative(u8, res) {
+  let P;
+  try { P = Native.parse(u8); } catch (e) { S.log.push('[native] ' + (e.message || e)); return; }
+  if (P.machine !== 0x14c && P.machine !== 0x8664) { S.log.push('[native] only x86 and x64 code can be disassembled here'); return; }
+  const entry = 'native/entry.asm', imp = 'native/imports.txt';
+  S.files.set(entry, { path: entry, type: 'asm', text: null, view: 'asm', make: async () => Native.listing(u8) });
+  S.files.set(imp, { path: imp, type: 'asm', text: null, view: 'asm', make: async () => Native.importsText(u8) });
+  S.classToSrc.set('native/entry', entry);
+  if (!S.entrypoints.size) S.entrypoints.add('native/entry');
+  const refs = P.importList.map(i => 'native/' + i.dll + '.' + i.fn);
+  Scan.scanClass(res, { name: 'native imports', refs, classes: [], strings: [] });
+  tag('disassembled (x86)', 'good');
+}
+
+// ------------------------------------------------------------------ .NET (C# / VB)
+
+async function loadDotnet(u8, res) {
+  let A;
+  setState('reading .NET metadata', 10);
+  await new Promise(r => setTimeout(r, 0));
+  try { A = Cil.load(u8); } catch (e) { S.log.push('[.net] could not read metadata: ' + (e.message || e)); return; }
+  S.dotnet = A;
+  const types = Cil.listTypes(A);
+  const info = new Map(Cil.scanInfo(A).map(x => [x.path, x]));
+  let n = 0;
+  for (const t of types) {
+    const internal = ((t.ns ? t.ns + '.' : '') + t.name).replace(/\./g, '/');
+    const f = { path: t.path, type: 'cs', ti: t.i, text: null, il: null, view: 'cs', entry: t.entry, make: () => Cil.decompileType(A, t.i) };
+    S.files.set(t.path, f);
+    S.classToSrc.set(internal, t.path);
+    if (t.entry) S.entrypoints.add(internal);
+    const si = info.get(t.path);
+    if (si) {
+      Scan.scanClass(res, { name: internal, refs: si.refs, classes: [], strings: si.strings });
+      if (si.strings.length) S.cpStrings.set(internal, si.strings.length > 400 ? si.strings.slice(0, 400) : si.strings);
+    }
+    if (++n % 200 === 0) { setState(`reading .NET types ${n}/${types.length}`, 10 + 70 * n / types.length); await new Promise(r => setTimeout(r, 0)); }
+  }
+  const asmInfo = '(assembly)/AssemblyInfo.cs';
+  S.files.set(asmInfo, { path: asmInfo, type: 'cs', text: null, view: 'cs', make: () => Cil.assemblyInfo(A) });
+  for (const r of Cil.resources(A)) {
+    const path = '(resources)/' + r.name.replace(/[\\:*?"<>|]/g, '_');
+    S.files.set(path, { path, type: 'res', bytes: r.bytes(), size: r.size });
+  }
+  if (!S.entrypoints.size) S.entrypoints.add('(assembly)/AssemblyInfo');
+  S.classToSrc.set('(assembly)/AssemblyInfo', asmInfo);
+  tag(`${types.length} C# types`, 'java');
+  tag('decompiled to C#', 'good');
+  S.log.push(`[.net] ${Cil.asmName(A)} · runtime ${A.version} · ${types.length} types${A.ilOnly ? '' : ' · mixed mode (also has native code)'}`);
 }
 
 // ------------------------------------------------------------------ python (PyInstaller)
@@ -1512,6 +1568,12 @@ el.dl.onclick = async () => {
         zip.file(f.path, f.text != null ? f.text : f.quick);
       }
       else if (f.type === 'py') zip.file(f.path + 'c', await pycBytes(f));
+      else if (f.type === 'cs') {
+        if (f.text == null) { try { f.text = f.make(); } catch (e) { f.text = '// ' + (e.message || e); } }
+        if (++i % 50 === 0) { el.dl.textContent = `zipping… ${i}`; await new Promise(r => setTimeout(r, 0)); }
+        zip.file(f.path, f.text);
+      }
+      else if (f.type === 'asm') zip.file(f.path, f.text || '');
       else zip.file(f.path, f.bytes || await f.zipEntry.async('uint8array'));
     }
     const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
@@ -1721,3 +1783,79 @@ async function allowScan() {
   history.replaceState(null, '', location.pathname + location.hash);
 })();
 
+
+// ------------------------------------------------------------------ Windows app (EZLARP.exe)
+// The app opens this page as /?app=1#app=<token>[&open=<ids>] and serves the files you opened
+// ("Scan with EZLARP", the mods folder) from a helper on 127.0.0.1, guarded by that token.
+const APP_HELPER = 'http://127.0.0.1:47613';
+const App = (() => {
+  const h = new URLSearchParams(location.hash.replace(/^#/, ''));
+  let token = h.get('app');
+  let open = (h.get('open') || '').split(',').filter(x => /^[0-9a-f]{12}$/.test(x));
+  try {
+    if (token && /^[0-9a-f]{48}$/.test(token)) {
+      sessionStorage.setItem('ezlarp-app', token);
+      if (open.length) sessionStorage.setItem('ezlarp-app-open', open.join(','));
+    } else token = sessionStorage.getItem('ezlarp-app');
+    if (!open.length) open = (sessionStorage.getItem('ezlarp-app-open') || '').split(',').filter(Boolean);
+  } catch (e) { /* storage blocked */ }
+  if (h.get('app')) history.replaceState(null, '', location.pathname + location.search);
+  return { on: !!token, token, open };
+})();
+
+async function appFetch(path) {
+  const r = await fetch(APP_HELPER + path, { headers: { 'X-EZLARP-Token': App.token }, cache: 'no-store' });
+  if (!r.ok) throw new Error('app helper said ' + r.status);
+  return r;
+}
+async function appFile(id, name) {
+  const r = await appFetch('/f/' + id);
+  const n = decodeURIComponent(r.headers.get('X-EZLARP-Name') || name || id);
+  return new File([await r.blob()], n);
+}
+const appHelperDown = () => toast('can\'t reach the EZLARP app: is it still running? If your browser asked to allow access to apps on this device, allow it.');
+
+async function appStart() {
+  document.body.classList.add('app');
+  document.getElementById('appmods').hidden = false;
+  await accountReady;
+  // the app is for logged-in users (when login is set up on the server)
+  if (Account.login && !Account.user && !Account.vpn) { document.getElementById('appgate').hidden = false; return; }
+  setInterval(() => { appFetch('/ping').catch(() => {}); }, 30000);
+  if (App.open.length) {
+    const ids = App.open.splice(0);
+    try { sessionStorage.removeItem('ezlarp-app-open'); } catch (e) { /* */ }
+    try {
+      const list = await appFetch('/files').then(r => r.json());
+      const files = [];
+      for (const id of ids) { const e = list.find(x => x.id === id); if (e) files.push(await appFile(id, e.name)); }
+      if (files.length) handleFiles(files);
+    } catch (e) { appHelperDown(); }
+  }
+}
+document.getElementById('appmods').onclick = async () => {
+  if (busy) return;
+  let res;
+  try { res = await appFetch('/mods').then(r => r.json()); } catch (e) { appHelperDown(); return; }
+  if (!res.files || !res.files.length) { toast(res.dirs && res.dirs.length ? 'your mods folders are empty' : 'no Minecraft mods folder found'); return; }
+  toast(`reading ${res.files.length} mods from ${res.dirs.length} folder${res.dirs.length === 1 ? '' : 's'}…`);
+  const files = [];
+  for (const e of res.files) { try { files.push(await appFile(e.id, e.name)); } catch (err) { /* skip unreadable */ } }
+  handleFiles(files);
+};
+if (App.on) appStart();
+
+// download popup for the Windows app
+const appdlEl = document.getElementById('appdl');
+document.getElementById('getapp').onclick = async () => {
+  appdlEl.hidden = false;
+  const hashEl = document.getElementById('appdlhash');
+  if (!hashEl.textContent) {
+    try {
+      const v = await fetch('/download/version.json', { cache: 'no-store' }).then(r => r.json());
+      hashEl.textContent = `version ${v.version} · ${(v.size / 1048576).toFixed(1)} MB · sha256 ${v.sha256}`;
+    } catch (e) { /* optional */ }
+  }
+};
+document.getElementById('appdlclose').onclick = () => { appdlEl.hidden = true; };
+appdlEl.onclick = e => { if (e.target === appdlEl) appdlEl.hidden = true; };
